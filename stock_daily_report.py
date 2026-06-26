@@ -3,10 +3,13 @@
 自选股每日资金走向 + 公告汇总 + AI点评
 每晚 20:30 定时推送至 Server酱（微信）
 """
-import requests, sys, os, time
-from datetime import datetime
+import requests, sys, os, time, random, argparse
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.stdout.reconfigure(encoding='utf-8')
+
+BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
 os.environ['NO_PROXY'] = '*'
 os.environ['no_proxy'] = '*'
@@ -26,15 +29,20 @@ PROXIES = {"http": None, "https": None}
 # 自选股列表：(代码, 名称, 市场[1=沪/0=深])
 # ETF 单独列表（无公告，只拉资金流向）
 STOCKS = [
+    ("001309", "德明利",   0),
+    ("688525", "佰维存储",  1),
+    ("688521", "芯原股份",  1),
+    ("600353", "旭光电子",  1),
+    ("002837", "英维克",   0),
+    ("688347", "华虹宏力",  1),
     ("688449", "联芸科技",  1),
     ("600578", "京能电力",  1),
-    ("688362", "甬矽电子",  1),
     ("300757", "罗博特科",  0),
     ("688820", "盛合晶微",  1),
     ("603986", "兆易创新",  1),
     ("300666", "江丰电子",  0),
     ("600111", "北方稀土",  1),
-    ("002289", "*ST宇顺",   0),
+    ("002289", "宇顺电子",  0),
     ("600330", "天通股份",  1),
     ("688256", "寒武纪",    1),
     ("688167", "炬光科技",  1),
@@ -78,54 +86,77 @@ def sign(val):
 
 # ============================================================
 # 1. 市场整体资金走向（上证/深证/创业板）
+# 使用腾讯财经接口
 # ============================================================
 def get_market_overview():
-    url = "http://push2.eastmoney.com/api/qt/ulist.np/get"
-    params = {
-        "fltt": 2, "invt": 2,
-        "fields": "f12,f14,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87",
-        "secids": "1.000001,0.399001,0.399006",
-        "ut": "b2884a393a59ad64002292a3e90d46a5",
+    # 腾讯财经行情接口，sh000001=上证，sz399001=深证，sz399006=创业板
+    url = "https://qt.gtimg.cn/q=sh000001,sz399001,sz399006"
+    lines = ["## 📊 市场整体行情\n"]
+    name_map = {
+        "sh000001": "上证指数",
+        "sz399001": "深证成指",
+        "sz399006": "创业板指",
     }
-    name_map = {"000001": "上证指数", "399001": "深证成指", "399006": "创业板指"}
-    lines = ["## 📊 市场整体资金走向\n"]
     try:
-        res = requests.get(url, params=params, headers=HEADERS, timeout=10, proxies=PROXIES, verify=False)
-        items = res.json().get("data", {}).get("diff", [])
-        for item in items:
-            code = item.get("f12", "")
-            name = name_map.get(code, code)
+        res = requests.get(url, timeout=10, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://finance.qq.com/",
+        })
+        res.encoding = "gbk"
+        for line in res.text.strip().split("\n"):
+            if not line.strip():
+                continue
+            # 格式: v_sh000001="..."; 取引号内内容
+            key = line.split("=")[0].replace("v_", "").strip()
+            val = line.split('"')[1] if '"' in line else ""
+            parts = val.split("~")
+            if len(parts) < 32:
+                continue
+            name = name_map.get(key, parts[1])
+            price   = parts[3]   # 当前价
+            change  = parts[31]  # 涨跌幅%
+            volume  = parts[6]   # 成交量（手）
+            amount  = parts[37]  # 成交额（万元）
+            try:
+                amt_val = float(amount)
+                amt_str = f"{amt_val/10000:.2f}亿" if amt_val >= 10000 else f"{amt_val:.0f}万"
+            except:
+                amt_str = amount
+            sign_str = "+" if not change.startswith("-") else ""
             lines.append(f"**{name}**")
-            lines.append(f"- 主力净流入：{sign(item.get('f62'))}")
-            lines.append(f"- 超大单：{sign(item.get('f66'))}　大单：{sign(item.get('f72'))}")
-            lines.append(f"- 中单：{sign(item.get('f78'))}　小单：{sign(item.get('f84'))}\n")
+            lines.append(f"- 当前：{price}　涨跌：{sign_str}{change}%")
+            lines.append(f"- 成交额：{amt_str}\n")
     except Exception as e:
         lines.append(f"获取失败：{e}\n")
     return "\n".join(lines)
 
 # ============================================================
-# 2. 行业板块资金流向 Top5 流入 / Top5 流出
+# 2. 行业板块涨跌幅 Top5 / Bottom5（新浪财经）
 # ============================================================
 def get_sector_flow():
-    url = "http://push2.eastmoney.com/api/qt/clist/get"
-    base = {
-        "fid": "f62", "pz": 5, "pn": 1, "np": 1, "fltt": 2, "invt": 2,
-        "fs": "m:90+t:2",
-        "fields": "f12,f14,f62",
-        "ut": "b2884a393a59ad64002292a3e90d46a5",
-    }
-    lines = ["## 🏭 行业板块资金\n"]
+    import json as _json
+    url = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeDataSimple?page=1&num=80&sort=changepercent&asc=0&node=ss_new&symbol="
+    lines = ["## 🏭 行业板块涨跌\n"]
     try:
-        r_in  = requests.get(url, params={**base, "po": 1}, headers=HEADERS, timeout=10, proxies=PROXIES, verify=False)
-        r_out = requests.get(url, params={**base, "po": 0}, headers=HEADERS, timeout=10, proxies=PROXIES, verify=False)
-        top_in  = r_in.json().get("data", {}).get("diff", [])
-        top_out = r_out.json().get("data", {}).get("diff", [])
-        lines.append("**净流入 Top5**")
-        for i, s in enumerate(top_in):
-            lines.append(f"{i+1}. {s.get('f14','')}　{sign(s.get('f62'))}")
-        lines.append("\n**净流出 Top5**")
-        for i, s in enumerate(top_out):
-            lines.append(f"{i+1}. {s.get('f14','')}　{sign(s.get('f62'))}")
+        res = requests.get(url, timeout=10, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://finance.sina.com.cn/",
+        })
+        res.encoding = "gbk"
+        data = _json.loads(res.text)
+        if not data:
+            raise ValueError("空数据")
+        data_sorted = sorted(data, key=lambda x: float(x.get("changepercent", 0)), reverse=True)
+        top5    = data_sorted[:5]
+        bottom5 = data_sorted[-5:][::-1]
+        lines.append("**涨幅 Top5**")
+        for i, s in enumerate(top5):
+            pct = float(s.get("changepercent", 0))
+            lines.append(f"{i+1}. {s.get('name','')}\t+{pct:.2f}%")
+        lines.append("\n**跌幅 Top5**")
+        for i, s in enumerate(bottom5):
+            pct = float(s.get("changepercent", 0))
+            lines.append(f"{i+1}. {s.get('name','')}\t{pct:.2f}%")
         lines.append("")
     except Exception as e:
         lines.append(f"获取失败：{e}\n")
@@ -134,7 +165,11 @@ def get_sector_flow():
 # ============================================================
 # 3. 个股资金流向（含ETF）
 # ============================================================
-def get_stock_flow(stock_code, stock_name, market):
+def get_stock_flow(stock_code, stock_name, market, retries=3, backoff=1.5):
+    """
+    带重试 + 详细错误记录的资金流向抓取。
+    返回 (data_dict_or_None, error_reason_str_or_None)
+    """
     secid = f"{market}.{stock_code}"
     url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
     params = {
@@ -143,10 +178,32 @@ def get_stock_flow(stock_code, stock_name, market):
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
         "ut": "b2884a393a59ad64002292a3e90d46a5",
     }
-    try:
-        res = requests.get(url, params=params, headers=HEADERS, timeout=10, proxies=PROXIES, verify=False)
-        klines = res.json().get("data", {}).get("klines", [])
-        if klines:
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            res = requests.get(url, params=params, headers=HEADERS, timeout=10,
+                                proxies=PROXIES, verify=False)
+            if res.status_code != 200:
+                last_err = f"HTTP {res.status_code}"
+                # 403/429 等多半是限流/反爬，等久一点再重试
+                time.sleep(backoff * attempt + random.uniform(0, 0.8))
+                continue
+
+            try:
+                body = res.json()
+            except ValueError:
+                snippet = res.text[:120].replace("\n", " ")
+                last_err = f"JSON解析失败，原始响应片段: {snippet!r}"
+                time.sleep(backoff * attempt)
+                continue
+
+            klines = body.get("data", {}).get("klines", [])
+            if not klines:
+                # 接口通了，但当天没有数据（常见原因：当日数据尚未生成 / secid 错误 / 当天停牌）
+                last_err = f"接口返回为空 data={body.get('data')!r}"
+                time.sleep(backoff * attempt)
+                continue
+
             p = klines[-1].split(",")
             return {
                 "date": p[0],
@@ -155,14 +212,24 @@ def get_stock_flow(stock_code, stock_name, market):
                 "mid_net":   float(p[3]),
                 "large_net": float(p[4]),
                 "super_net": float(p[5]),
-            }
-    except:
-        pass
-    return None
+            }, None
 
-def format_stock_flow(stock_name, stock_code, data):
+        except requests.exceptions.Timeout:
+            last_err = "请求超时"
+        except requests.exceptions.RequestException as e:
+            last_err = f"网络异常: {e}"
+        except Exception as e:
+            last_err = f"未知异常: {type(e).__name__}: {e}"
+
+        time.sleep(backoff * attempt + random.uniform(0, 0.5))
+
+    print(f"[资金流向失败] {stock_name}({stock_code}): {last_err}")
+    return None, last_err
+
+def format_stock_flow(stock_name, stock_code, data, error=None):
     if not data:
-        return f"**{stock_name}({stock_code})**: 无资金流向数据\n"
+        reason = f"（原因：{error}）" if error else ""
+        return f"**{stock_name}({stock_code})**: 资金流向获取失败 {reason}\n"
     return (
         f"**{stock_name}({stock_code})** [{data['date']}]\n"
         f"- 主力净流入：{sign(data['main_net'])}\n"
@@ -244,7 +311,7 @@ def get_ai_comment(stock_name, stock_code, announcements, flow_data):
 # 6. 汇总并构建报告
 # ============================================================
 def build_report():
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
     sections = [f"# 📈 自选股日报　{now}\n"]
 
     # — 市场整体 —
@@ -258,24 +325,43 @@ def build_report():
     # — 个股：并发抓取公告+资金，再并发AI点评 —
     sections.append("## 🔍 自选股详情\n")
 
-    def fetch_stock_data(item):
+    # 资金流向：单独限制并发数（避免同时砸接口被限流），轮流轻微错峰
+    flow_results = {}
+    def fetch_flow_only(item):
         code, name, mkt = item
-        flow = get_stock_flow(code, name, mkt)
-        anns = get_announcements(code)
-        return code, name, mkt, flow, anns
+        time.sleep(random.uniform(0, 0.6))  # 错峰，避免8个请求同一毫秒发出
+        flow, err = get_stock_flow(code, name, mkt)
+        return code, flow, err
 
-    # 并发抓取资金和公告
-    stock_data = {}
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = {ex.submit(fetch_stock_data, s): s for s in STOCKS}
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futures = {ex.submit(fetch_flow_only, s): s for s in STOCKS}
         for fut in as_completed(futures):
-            code, name, mkt, flow, anns = fut.result()
-            stock_data[code] = (name, mkt, flow, anns)
+            code, flow, err = fut.result()
+            flow_results[code] = (flow, err)
+
+    # 公告：维持原有并发度（接口对并发不敏感）
+    def fetch_anns_only(item):
+        code, name, mkt = item
+        anns = get_announcements(code)
+        return code, anns
+
+    ann_results = {}
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = {ex.submit(fetch_anns_only, s): s for s in STOCKS}
+        for fut in as_completed(futures):
+            code, anns = fut.result()
+            ann_results[code] = anns
+
+    stock_data = {}
+    for code, name, mkt in STOCKS:
+        flow, err = flow_results[code]
+        anns = ann_results[code]
+        stock_data[code] = (name, mkt, flow, anns, err)
 
     # 并发获取 AI 点评
     def fetch_comment(item):
         code, name, mkt = item
-        name, mkt, flow, anns = stock_data[code]
+        name, mkt, flow, anns, err = stock_data[code]
         comment = get_ai_comment(name, code, anns, flow)
         return code, comment
 
@@ -287,9 +373,12 @@ def build_report():
             comments[code] = comment
 
     # 按原顺序输出
+    flow_fail_count = 0
     for code, name, mkt in STOCKS:
-        name, mkt, flow, anns = stock_data[code]
+        name, mkt, flow, anns, err = stock_data[code]
         comment = comments.get(code, "（点评获取失败）")
+        if not flow:
+            flow_fail_count += 1
 
         block = [f"### {name}（{code}）\n"]
         if anns:
@@ -301,17 +390,20 @@ def build_report():
         else:
             block.append("暂无新公告\n")
 
-        block.append(format_stock_flow(name, code, flow))
+        block.append(format_stock_flow(name, code, flow, err))
         block.append(f"> 💡 {comment}\n")
         block.append("---")
         sections.append("\n".join(block))
 
+    if flow_fail_count:
+        sections.insert(1, f"⚠️ 资金流向接口本次有 {flow_fail_count}/{len(STOCKS)} 只个股获取失败，详见各股票下方原因说明。\n")
+
     # — ETF 资金流向 —
     sections.append("## 📦 ETF 资金流向\n")
     for code, name, mkt in ETFS:
-        flow = get_stock_flow(code, name, mkt)
-        sections.append(format_stock_flow(name, code, flow))
-        time.sleep(0.2)
+        flow, err = get_stock_flow(code, name, mkt)
+        sections.append(format_stock_flow(name, code, flow, err))
+        time.sleep(0.3)
 
     return "\n".join(sections)
 
@@ -331,11 +423,52 @@ def send_to_serverchan(title, content):
         print(f"❌ 推送失败：{e}")
 
 # ============================================================
+# 8. 内置定时调度（按北京时间）
+# ============================================================
+def run_once():
+    print(f"[{datetime.now(BEIJING_TZ).strftime('%H:%M:%S')}] 开始生成日报...")
+    report = build_report()
+    print(report)
+    title = f"📈 自选股日报 {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d')}"
+    send_to_serverchan(title, report)
+
+def next_run_time(hour, minute):
+    now = datetime.now(BEIJING_TZ)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return target
+
+def run_scheduler(hour, minute):
+    print(f"📅 调度已启动（北京时间），每天 {hour:02d}:{minute:02d} 自动运行。按 Ctrl+C 退出。")
+    while True:
+        target = next_run_time(hour, minute)
+        wait_seconds = (target - datetime.now(BEIJING_TZ)).total_seconds()
+        print(f"⏳ 下次运行时间：{target.strftime('%Y-%m-%d %H:%M:%S')}（北京时间），"
+              f"将等待 {wait_seconds/3600:.1f} 小时")
+        time.sleep(max(wait_seconds, 0))
+        try:
+            run_once()
+        except Exception as e:
+            print(f"❌ 本次任务执行异常：{e}")
+        # 避免在目标这一分钟内因系统时钟抖动重复触发
+        time.sleep(60)
+
+# ============================================================
 # 主入口
 # ============================================================
 if __name__ == "__main__":
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 开始生成日报...")
-    report = build_report()
-    print(report)
-    title = f"📈 自选股日报 {datetime.now().strftime('%Y-%m-%d')}"
-    send_to_serverchan(title, report)
+    parser = argparse.ArgumentParser(description="自选股日报：默认按北京时间每天定时运行，可用 --now 立即手动跑一次")
+    parser.add_argument("--now", action="store_true", help="立即运行一次（用于测试/手动补发），不进入定时循环")
+    parser.add_argument("--time", default="20:30", help="每日定时运行的北京时间，格式 HH:MM，默认 20:30")
+    args = parser.parse_args()
+
+    if args.now:
+        run_once()
+    else:
+        try:
+            hh, mm = map(int, args.time.split(":"))
+        except ValueError:
+            print(f"⚠️ --time 参数格式不对（应为 HH:MM），收到的是: {args.time}，将使用默认 20:30")
+            hh, mm = 20, 30
+        run_scheduler(hh, mm)
