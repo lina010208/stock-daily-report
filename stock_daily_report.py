@@ -399,19 +399,23 @@ def build_report():
         anns = ann_results[code]
         stock_data[code] = (name, mkt, flow, anns, err)
 
-    # 并发获取 AI 点评
+    # AI 点评辅助函数
     def fetch_comment(item):
         code, name, mkt = item
         name, mkt, flow, anns, err = stock_data[code]
         comment = get_ai_comment(name, code, anns, flow)
         return code, comment
 
+    # 并发获取 AI 点评（限流：每批3个，避免DeepSeek限流）
     comments = {}
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = {ex.submit(fetch_comment, s): s for s in STOCKS}
-        for fut in as_completed(futures):
-            code, comment = fut.result()
-            comments[code] = comment
+    batch_size = 3
+    for i in range(0, len(STOCKS), batch_size):
+        batch = STOCKS[i:i + batch_size]
+        with ThreadPoolExecutor(max_workers=batch_size) as ex:
+            futures = {ex.submit(fetch_comment, s): s for s in batch}
+            for fut in as_completed(futures):
+                code, comment = fut.result()
+                comments[code] = comment
 
     # 按原顺序输出
     flow_fail_count = 0
