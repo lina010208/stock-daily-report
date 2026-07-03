@@ -3,11 +3,16 @@
 自选股每日资金走向 + 公告汇总 + AI点评
 每晚 20:30 定时推送至 Server酱（微信）
 """
-import requests, sys, os, time, random, argparse
+import requests, sys, os, time, random, argparse, urllib3
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
-sys.stdout.reconfigure(encoding='utf-8')
+
+# 兼容不同环境：GitHub Actions / Windows / Linux
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding='utf-8')
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -19,7 +24,7 @@ os.environ['no_proxy'] = '*'
 # ============================================================
 SENDKEY         = os.environ.get("SENDKEY", "")
 DEEPSEEK_KEY    = os.environ.get("DEEPSEEK_KEY", "")
-USE_AI_COMMENT  = os.environ.get("USE_AI_COMMENT", "false").lower() == "true"
+USE_AI_COMMENT  = os.environ.get("USE_AI_COMMENT", "true").lower() == "true"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -62,10 +67,10 @@ STOCKS = [
 ]
 
 ETFS = [
-    ("159509", "纳指科技ETF景顺",  0),
-    ("513390", "纳指100ETF博时",   0),
-    ("513310", "中韩半导体ETF",    0),
-    ("159659", "纳斯达克100ETI",   0),
+    ("159509", "纳指科技ETF景顺",  0),   # 15开头 = 深市
+    ("513390", "纳指100ETF博时",   1),   # 51开头 = 沪市
+    ("513310", "中韩半导体ETF",    1),   # 51开头 = 沪市
+    ("159659", "纳斯达克100ETI",   0),   # 15开头 = 深市
 ]
 
 # ============================================================
@@ -205,7 +210,8 @@ def get_stock_flow(stock_code, stock_name, market, retries=2, backoff=0.8):
                 time.sleep(backoff * attempt)
                 continue
 
-            klines = body.get("data", {}).get("klines", [])
+            data_obj = body.get("data") or {}
+            klines = data_obj.get("klines", []) if isinstance(data_obj, dict) else []
             if not klines:
                 last_err = f"无数据"
                 time.sleep(backoff * attempt)
@@ -233,10 +239,10 @@ def get_stock_flow(stock_code, stock_name, market, retries=2, backoff=0.8):
     print(f"[资金流向失败] {stock_name}({stock_code}): {last_err}")
     return None, last_err
 
-
 def _parse_daykline_flow(body):
     """解析历史K线资金流接口"""
-    klines = body.get("data", {}).get("klines", [])
+    data_obj = body.get("data") or {}
+    klines = data_obj.get("klines", []) if isinstance(data_obj, dict) else []
     if not klines:
         return None
     p = klines[-1].split(",")
@@ -249,11 +255,10 @@ def _parse_daykline_flow(body):
         "super_net": float(p[5]),
     }
 
-
 def _parse_realtime_flow(body):
     """解析实时资金流接口（备用）"""
-    data = body.get("data", {})
-    if not data:
+    data = body.get("data")
+    if not isinstance(data, dict):
         return None
     try:
         return {
@@ -266,7 +271,6 @@ def _parse_realtime_flow(body):
         }
     except (TypeError, ValueError):
         return None
-
 
 def format_stock_flow(stock_name, stock_code, data, error=None):
     if not data:
@@ -306,7 +310,7 @@ def get_announcements(stock_code):
         return []
 
 # ============================================================
-# 5. AI 点评（调用 Claude API）
+# 5. AI 点评（调用 DeepSeek API）
 # ============================================================
 def get_ai_comment(stock_name, stock_code, announcements, flow_data):
     ann_text = ""
@@ -400,7 +404,7 @@ def build_report():
         anns = ann_results[code]
         stock_data[code] = (name, mkt, flow, anns, err)
 
-    # AI 点评（默认关闭，需设置 USE_AI_COMMENT=true 环境变量开启）
+    # AI 点评（默认开启；如需关闭，可设置 USE_AI_COMMENT=false）
     comments = {}
     if USE_AI_COMMENT and DEEPSEEK_KEY:
         def fetch_comment(item):
@@ -422,7 +426,7 @@ def build_report():
     flow_fail_count = 0
     for code, name, mkt in STOCKS:
         name, mkt, flow, anns, err = stock_data[code]
-        comment = comments.get(code, "（AI点评已关闭）")
+        comment = comments.get(code, "（AI点评未开启或 DEEPSEEK_KEY 未配置）")
         if not flow:
             flow_fail_count += 1
 
