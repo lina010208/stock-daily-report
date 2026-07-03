@@ -173,74 +173,61 @@ def get_sector_flow():
 # ============================================================
 # 3. 个股资金流向（含ETF）
 # ============================================================
-def get_stock_flow(stock_code, stock_name, market, retries=5, backoff=2.0):
+def get_stock_flow(stock_code, stock_name, market, retries=2, backoff=0.8):
     """
-    带多接口 fallback + 重试 + 详细错误记录的资金流向抓取。
+    带重试的资金流向抓取。
     返回 (data_dict_or_None, error_reason_str_or_None)
     """
     secid = f"{market}.{stock_code}"
-
-    # 备用接口列表（历史K线 → 实时资金流向 → 历史资金流向）
-    apis = [
-        {
-            "name": "历史K线资金流",
-            "url": "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get",
-            "params": {
-                "lmt": 1, "klt": 101, "secid": secid,
-                "fields1": "f1,f2,f3,f7",
-                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
-                "ut": "b2884a393a59ad64002292a3e90d46a5",
-            },
-            "parser": lambda body: _parse_daykline_flow(body),
-        },
-        {
-            "name": "实时资金流",
-            "url": "https://push2.eastmoney.com/api/qt/stock/fflow/get",
-            "params": {
-                "secid": secid,
-                "fields1": "f1,f2,f3,f7",
-                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
-                "ut": "b2884a393a59ad64002292a3e90d46a5",
-            },
-            "parser": lambda body: _parse_realtime_flow(body),
-        },
-    ]
-
+    url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+    params = {
+        "lmt": 1, "klt": 101, "secid": secid,
+        "fields1": "f1,f2,f3,f7",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+        "ut": "b2884a393a59ad64002292a3e90d46a5",
+    }
     last_err = None
-    for api_idx, api in enumerate(apis):
-        for attempt in range(1, retries + 1):
-            try:
-                res = requests.get(api["url"], params=api["params"], headers=HEADERS,
-                                   timeout=15, proxies=PROXIES, verify=False)
-                if res.status_code != 200:
-                    last_err = f"[{api['name']}] HTTP {res.status_code}"
-                    time.sleep(backoff * attempt + random.uniform(0, 1.0))
-                    continue
-
-                try:
-                    body = res.json()
-                except ValueError:
-                    snippet = res.text[:120].replace("\n", " ")
-                    last_err = f"[{api['name']}] JSON解析失败：{snippet!r}"
-                    time.sleep(backoff * attempt)
-                    continue
-
-                data = api["parser"](body)
-                if data is not None:
-                    return data, None
-
-                last_err = f"[{api['name']}] 无数据 body={str(body)[:80]}"
-                time.sleep(backoff * attempt + random.uniform(0, 0.5))
+    for attempt in range(1, retries + 1):
+        try:
+            res = requests.get(url, params=params, headers=HEADERS,
+                               timeout=6, proxies=PROXIES, verify=False)
+            if res.status_code != 200:
+                last_err = f"HTTP {res.status_code}"
+                time.sleep(backoff * attempt)
                 continue
 
-            except requests.exceptions.Timeout:
-                last_err = f"[{api['name']}] 请求超时"
-            except requests.exceptions.RequestException as e:
-                last_err = f"[{api['name']}] 网络异常: {e}"
-            except Exception as e:
-                last_err = f"[{api['name']}] 未知异常: {type(e).__name__}: {e}"
+            try:
+                body = res.json()
+            except ValueError:
+                snippet = res.text[:80].replace("\n", " ")
+                last_err = f"JSON解析失败：{snippet!r}"
+                time.sleep(backoff * attempt)
+                continue
 
-            time.sleep(backoff * attempt + random.uniform(0, 0.5))
+            klines = body.get("data", {}).get("klines", [])
+            if not klines:
+                last_err = f"无数据"
+                time.sleep(backoff * attempt)
+                continue
+
+            p = klines[-1].split(",")
+            return {
+                "date": p[0],
+                "main_net":  float(p[1]),
+                "small_net": float(p[2]),
+                "mid_net":   float(p[3]),
+                "large_net": float(p[4]),
+                "super_net": float(p[5]),
+            }, None
+
+        except requests.exceptions.Timeout:
+            last_err = "请求超时"
+        except requests.exceptions.RequestException as e:
+            last_err = f"网络异常: {e}"
+        except Exception as e:
+            last_err = f"未知异常: {type(e).__name__}: {e}"
+
+        time.sleep(backoff * attempt)
 
     print(f"[资金流向失败] {stock_name}({stock_code}): {last_err}")
     return None, last_err
@@ -278,6 +265,7 @@ def _parse_realtime_flow(body):
         }
     except (TypeError, ValueError):
         return None
+
 
 def format_stock_flow(stock_name, stock_code, data, error=None):
     if not data:
@@ -378,15 +366,15 @@ def build_report():
     # — 个股：并发抓取公告+资金，再并发AI点评 —
     sections.append("## 🔍 自选股详情\n")
 
-    # 资金流向：限制并发数 + 较大错峰，避免被限流
+    # 资金流向：限制并发数 + 错峰，避免被限流
     flow_results = {}
     def fetch_flow_only(item):
         code, name, mkt = item
-        time.sleep(random.uniform(0.5, 1.5))  # 错峰 0.5~1.5s
+        time.sleep(random.uniform(0.3, 0.8))  # 错峰 0.3~0.8s
         flow, err = get_stock_flow(code, name, mkt)
         return code, flow, err
 
-    with ThreadPoolExecutor(max_workers=2) as ex:
+    with ThreadPoolExecutor(max_workers=4) as ex:
         futures = {ex.submit(fetch_flow_only, s): s for s in STOCKS}
         for fut in as_completed(futures):
             code, flow, err = fut.result()
@@ -456,7 +444,7 @@ def build_report():
     for code, name, mkt in ETFS:
         flow, err = get_stock_flow(code, name, mkt)
         sections.append(format_stock_flow(name, code, flow, err))
-        time.sleep(random.uniform(1.0, 2.0))
+        time.sleep(random.uniform(0.5, 1.0))
 
     return "\n".join(sections)
 
