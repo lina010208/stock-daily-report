@@ -29,27 +29,35 @@ PROXIES = {"http": None, "https": None}
 # 自选股列表：(代码, 名称, 市场[1=沪/0=深])
 # ETF 单独列表（无公告，只拉资金流向）
 STOCKS = [
-    ("001309", "德明利",   0),
-    ("688525", "佰维存储",  1),
-    ("688521", "芯原股份",  1),
-    ("600353", "旭光电子",  1),
-    ("002837", "英维克",   0),
-    ("688347", "华虹宏力",  1),
-    ("688449", "联芸科技",  1),
-    ("600578", "京能电力",  1),
-    ("300757", "罗博特科",  0),
-    ("688820", "盛合晶微",  1),
-    ("603986", "兆易创新",  1),
-    ("300666", "江丰电子",  0),
-    ("600111", "北方稀土",  1),
-    ("002289", "宇顺电子",  0),
-    ("600330", "天通股份",  1),
-    ("688256", "寒武纪",    1),
-    ("688167", "炬光科技",  1),
-    ("300750", "宁德时代",  0),
-    ("601899", "紫金矿业",  1),
-    ("300394", "天孚通信",  0),
-    ("301630", "同宇新材",  0),
+    ("001248", "C华润",        0),
+    ("600176", "中国巨石",      1),
+    ("600584", "长电科技",      1),
+    ("001309", "德明利",        0),
+    ("688525", "佰维存储",      1),
+    ("688521", "芯原股份",      1),
+    ("600353", "旭光电子",      1),
+    ("002837", "英维克",        0),
+    ("688347", "华虹宏力",      1),
+    ("688449", "联芸科技",      1),
+    ("600578", "京能电力",      1),
+    ("300757", "罗博特科",      0),
+    ("688820", "盛合晶微",      1),
+    ("603986", "兆易创新",      1),
+    ("300666", "江丰电子",      0),
+    ("600111", "北方稀土",      1),
+    ("002289", "宇顺电子",      0),
+    ("600330", "天通股份",      1),
+    ("688256", "寒武纪",        1),
+    ("688167", "炬光科技",      1),
+    ("300750", "宁德时代",      0),
+    ("688008", "澜起科技",      1),
+    ("601899", "紫金矿业",      1),
+    ("601138", "工业富联",      1),
+    ("300394", "天孚通信",      0),
+    ("688585", "上纬新材",      1),
+    ("301630", "同宇新材",      0),
+    ("300308", "中际旭创",      0),
+    ("300408", "三环集团",      0),
 ]
 
 ETFS = [
@@ -165,66 +173,111 @@ def get_sector_flow():
 # ============================================================
 # 3. 个股资金流向（含ETF）
 # ============================================================
-def get_stock_flow(stock_code, stock_name, market, retries=3, backoff=1.5):
+def get_stock_flow(stock_code, stock_name, market, retries=5, backoff=2.0):
     """
-    带重试 + 详细错误记录的资金流向抓取。
+    带多接口 fallback + 重试 + 详细错误记录的资金流向抓取。
     返回 (data_dict_or_None, error_reason_str_or_None)
     """
     secid = f"{market}.{stock_code}"
-    url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
-    params = {
-        "lmt": 1, "klt": 101, "secid": secid,
-        "fields1": "f1,f2,f3,f7",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
-        "ut": "b2884a393a59ad64002292a3e90d46a5",
-    }
+
+    # 备用接口列表（历史K线 → 实时资金流向 → 历史资金流向）
+    apis = [
+        {
+            "name": "历史K线资金流",
+            "url": "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get",
+            "params": {
+                "lmt": 1, "klt": 101, "secid": secid,
+                "fields1": "f1,f2,f3,f7",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+                "ut": "b2884a393a59ad64002292a3e90d46a5",
+            },
+            "parser": lambda body: _parse_daykline_flow(body),
+        },
+        {
+            "name": "实时资金流",
+            "url": "https://push2.eastmoney.com/api/qt/stock/fflow/get",
+            "params": {
+                "secid": secid,
+                "fields1": "f1,f2,f3,f7",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+                "ut": "b2884a393a59ad64002292a3e90d46a5",
+            },
+            "parser": lambda body: _parse_realtime_flow(body),
+        },
+    ]
+
     last_err = None
-    for attempt in range(1, retries + 1):
-        try:
-            res = requests.get(url, params=params, headers=HEADERS, timeout=10,
-                                proxies=PROXIES, verify=False)
-            if res.status_code != 200:
-                last_err = f"HTTP {res.status_code}"
-                # 403/429 等多半是限流/反爬，等久一点再重试
-                time.sleep(backoff * attempt + random.uniform(0, 0.8))
-                continue
-
+    for api_idx, api in enumerate(apis):
+        for attempt in range(1, retries + 1):
             try:
-                body = res.json()
-            except ValueError:
-                snippet = res.text[:120].replace("\n", " ")
-                last_err = f"JSON解析失败，原始响应片段: {snippet!r}"
-                time.sleep(backoff * attempt)
+                res = requests.get(api["url"], params=api["params"], headers=HEADERS,
+                                   timeout=15, proxies=PROXIES, verify=False)
+                if res.status_code != 200:
+                    last_err = f"[{api['name']}] HTTP {res.status_code}"
+                    time.sleep(backoff * attempt + random.uniform(0, 1.0))
+                    continue
+
+                try:
+                    body = res.json()
+                except ValueError:
+                    snippet = res.text[:120].replace("\n", " ")
+                    last_err = f"[{api['name']}] JSON解析失败：{snippet!r}"
+                    time.sleep(backoff * attempt)
+                    continue
+
+                data = api["parser"](body)
+                if data is not None:
+                    return data, None
+
+                last_err = f"[{api['name']}] 无数据 body={str(body)[:80]}"
+                time.sleep(backoff * attempt + random.uniform(0, 0.5))
                 continue
 
-            klines = body.get("data", {}).get("klines", [])
-            if not klines:
-                # 接口通了，但当天没有数据（常见原因：当日数据尚未生成 / secid 错误 / 当天停牌）
-                last_err = f"接口返回为空 data={body.get('data')!r}"
-                time.sleep(backoff * attempt)
-                continue
+            except requests.exceptions.Timeout:
+                last_err = f"[{api['name']}] 请求超时"
+            except requests.exceptions.RequestException as e:
+                last_err = f"[{api['name']}] 网络异常: {e}"
+            except Exception as e:
+                last_err = f"[{api['name']}] 未知异常: {type(e).__name__}: {e}"
 
-            p = klines[-1].split(",")
-            return {
-                "date": p[0],
-                "main_net":  float(p[1]),
-                "small_net": float(p[2]),
-                "mid_net":   float(p[3]),
-                "large_net": float(p[4]),
-                "super_net": float(p[5]),
-            }, None
-
-        except requests.exceptions.Timeout:
-            last_err = "请求超时"
-        except requests.exceptions.RequestException as e:
-            last_err = f"网络异常: {e}"
-        except Exception as e:
-            last_err = f"未知异常: {type(e).__name__}: {e}"
-
-        time.sleep(backoff * attempt + random.uniform(0, 0.5))
+            time.sleep(backoff * attempt + random.uniform(0, 0.5))
 
     print(f"[资金流向失败] {stock_name}({stock_code}): {last_err}")
     return None, last_err
+
+
+def _parse_daykline_flow(body):
+    """解析历史K线资金流接口"""
+    klines = body.get("data", {}).get("klines", [])
+    if not klines:
+        return None
+    p = klines[-1].split(",")
+    return {
+        "date": p[0],
+        "main_net":  float(p[1]),
+        "small_net": float(p[2]),
+        "mid_net":   float(p[3]),
+        "large_net": float(p[4]),
+        "super_net": float(p[5]),
+    }
+
+
+def _parse_realtime_flow(body):
+    """解析实时资金流接口（备用）"""
+    data = body.get("data", {})
+    if not data:
+        return None
+    try:
+        return {
+            "date": datetime.now(BEIJING_TZ).strftime("%Y-%m-%d"),
+            "main_net":  float(data.get("f62", 0)),
+            "small_net": float(data.get("f66", 0)),
+            "mid_net":   float(data.get("f64", 0)),
+            "large_net": float(data.get("f60", 0)),
+            "super_net": float(data.get("f58", 0)),
+        }
+    except (TypeError, ValueError):
+        return None
 
 def format_stock_flow(stock_name, stock_code, data, error=None):
     if not data:
@@ -325,15 +378,15 @@ def build_report():
     # — 个股：并发抓取公告+资金，再并发AI点评 —
     sections.append("## 🔍 自选股详情\n")
 
-    # 资金流向：单独限制并发数（避免同时砸接口被限流），轮流轻微错峰
+    # 资金流向：限制并发数 + 较大错峰，避免被限流
     flow_results = {}
     def fetch_flow_only(item):
         code, name, mkt = item
-        time.sleep(random.uniform(0, 0.6))  # 错峰，避免8个请求同一毫秒发出
+        time.sleep(random.uniform(0.5, 1.5))  # 错峰 0.5~1.5s
         flow, err = get_stock_flow(code, name, mkt)
         return code, flow, err
 
-    with ThreadPoolExecutor(max_workers=3) as ex:
+    with ThreadPoolExecutor(max_workers=2) as ex:
         futures = {ex.submit(fetch_flow_only, s): s for s in STOCKS}
         for fut in as_completed(futures):
             code, flow, err = fut.result()
@@ -403,7 +456,7 @@ def build_report():
     for code, name, mkt in ETFS:
         flow, err = get_stock_flow(code, name, mkt)
         sections.append(format_stock_flow(name, code, flow, err))
-        time.sleep(0.3)
+        time.sleep(random.uniform(1.0, 2.0))
 
     return "\n".join(sections)
 
