@@ -380,28 +380,27 @@ def build_report():
     # — 个股：并发抓取公告+资金，再并发AI点评 —
     sections.append("## 🔍 自选股详情\n")
 
-    # 资金流向：限制并发数 + 错峰，避免被限流
+    # 资金流向：并发拉取，max_workers提高加快速度
     flow_results = {}
     def fetch_flow_only(item):
         code, name, mkt = item
-        time.sleep(random.uniform(0.3, 0.8))  # 错峰 0.3~0.8s
         flow, err = get_stock_flow(code, name, mkt)
         return code, flow, err
 
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=10) as ex:
         futures = {ex.submit(fetch_flow_only, s): s for s in STOCKS}
         for fut in as_completed(futures):
             code, flow, err = fut.result()
             flow_results[code] = (flow, err)
 
-    # 公告：维持原有并发度（接口对并发不敏感）
+    # 公告：并发抓取
     def fetch_anns_only(item):
         code, name, mkt = item
         anns = get_announcements(code)
         return code, anns
 
     ann_results = {}
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=10) as ex:
         futures = {ex.submit(fetch_anns_only, s): s for s in STOCKS}
         for fut in as_completed(futures):
             code, anns = fut.result()
@@ -413,7 +412,7 @@ def build_report():
         anns = ann_results[code]
         stock_data[code] = (name, mkt, flow, anns, err)
 
-    # AI 点评（默认开启；如需关闭，可设置 USE_AI_COMMENT=false）
+    # AI 点评：全部并发
     comments = {}
     if USE_AI_COMMENT and DEEPSEEK_KEY:
         def fetch_comment(item):
@@ -422,14 +421,11 @@ def build_report():
             comment = get_ai_comment(name, code, anns, flow)
             return code, comment
 
-        batch_size = 3
-        for i in range(0, len(STOCKS), batch_size):
-            batch = STOCKS[i:i + batch_size]
-            with ThreadPoolExecutor(max_workers=batch_size) as ex:
-                futures = {ex.submit(fetch_comment, s): s for s in batch}
-                for fut in as_completed(futures):
-                    code, comment = fut.result()
-                    comments[code] = comment
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            futures = {ex.submit(fetch_comment, s): s for s in STOCKS}
+            for fut in as_completed(futures):
+                code, comment = fut.result()
+                comments[code] = comment
 
     # 按原顺序输出
     flow_fail_count = 0
@@ -457,12 +453,19 @@ def build_report():
     if flow_fail_count:
         sections.insert(1, f"⚠️ 资金流向接口本次有 {flow_fail_count}/{len(STOCKS)} 只个股获取失败，详见各股票下方原因说明。\n")
 
-    # — ETF 资金流向 —
+    # — ETF 资金流向：并发抓取 —
     sections.append("## 📦 ETF 资金流向\n")
-    for code, name, mkt in ETFS:
+
+    def fetch_etf(item):
+        code, name, mkt = item
         flow, err = get_stock_flow(code, name, mkt)
-        sections.append(format_stock_flow(name, code, flow, err))
-        time.sleep(random.uniform(0.5, 1.0))
+        return name, code, flow, err
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futures = {ex.submit(fetch_etf, e): e for e in ETFS}
+        for fut in as_completed(futures):
+            name, code, flow, err = fut.result()
+            sections.append(format_stock_flow(name, code, flow, err))
 
     return "\n".join(sections)
 
