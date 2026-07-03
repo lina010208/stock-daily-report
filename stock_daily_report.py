@@ -17,8 +17,9 @@ os.environ['no_proxy'] = '*'
 # ============================================================
 # 配置区
 # ============================================================
-SENDKEY      = os.environ.get("SENDKEY", "")
-DEEPSEEK_KEY = os.environ.get("DEEPSEEK_KEY", "")
+SENDKEY         = os.environ.get("SENDKEY", "")
+DEEPSEEK_KEY    = os.environ.get("DEEPSEEK_KEY", "")
+USE_AI_COMMENT  = os.environ.get("USE_AI_COMMENT", "false").lower() == "true"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -399,29 +400,29 @@ def build_report():
         anns = ann_results[code]
         stock_data[code] = (name, mkt, flow, anns, err)
 
-    # AI 点评辅助函数
-    def fetch_comment(item):
-        code, name, mkt = item
-        name, mkt, flow, anns, err = stock_data[code]
-        comment = get_ai_comment(name, code, anns, flow)
-        return code, comment
-
-    # 并发获取 AI 点评（限流：每批3个，避免DeepSeek限流）
+    # AI 点评（默认关闭，需设置 USE_AI_COMMENT=true 环境变量开启）
     comments = {}
-    batch_size = 3
-    for i in range(0, len(STOCKS), batch_size):
-        batch = STOCKS[i:i + batch_size]
-        with ThreadPoolExecutor(max_workers=batch_size) as ex:
-            futures = {ex.submit(fetch_comment, s): s for s in batch}
-            for fut in as_completed(futures):
-                code, comment = fut.result()
-                comments[code] = comment
+    if USE_AI_COMMENT and DEEPSEEK_KEY:
+        def fetch_comment(item):
+            code, name, mkt = item
+            name, mkt, flow, anns, err = stock_data[code]
+            comment = get_ai_comment(name, code, anns, flow)
+            return code, comment
+
+        batch_size = 3
+        for i in range(0, len(STOCKS), batch_size):
+            batch = STOCKS[i:i + batch_size]
+            with ThreadPoolExecutor(max_workers=batch_size) as ex:
+                futures = {ex.submit(fetch_comment, s): s for s in batch}
+                for fut in as_completed(futures):
+                    code, comment = fut.result()
+                    comments[code] = comment
 
     # 按原顺序输出
     flow_fail_count = 0
     for code, name, mkt in STOCKS:
         name, mkt, flow, anns, err = stock_data[code]
-        comment = comments.get(code, "（点评获取失败）")
+        comment = comments.get(code, "（AI点评已关闭）")
         if not flow:
             flow_fail_count += 1
 
