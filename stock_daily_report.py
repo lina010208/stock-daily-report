@@ -115,7 +115,7 @@ def get_market_overview():
         res = requests.get(url, timeout=10, headers={
             "User-Agent": "Mozilla/5.0",
             "Referer": "https://finance.qq.com/",
-        })
+        }, verify=False)
         res.encoding = "gbk"
         for line in res.text.strip().split("\n"):
             if not line.strip():
@@ -145,32 +145,41 @@ def get_market_overview():
     return "\n".join(lines)
 
 # ============================================================
-# 2. 行业板块涨跌幅 Top5 / Bottom5（新浪财经）
+# 2. 行业板块涨跌幅 Top5 / Bottom5（东方财富）
 # ============================================================
 def get_sector_flow():
     import json as _json
-    url = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeDataSimple?page=1&num=80&sort=changepercent&asc=0&node=ss_new&symbol="
+    url = "https://push2.eastmoney.com/api/qt/clist/get"
     lines = ["## 🏭 行业板块涨跌\n"]
+
     try:
-        res = requests.get(url, timeout=10, headers={
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://finance.sina.com.cn/",
-        })
-        res.encoding = "gbk"
-        data = _json.loads(res.text)
-        if not data:
-            raise ValueError("空数据")
-        data_sorted = sorted(data, key=lambda x: float(x.get("changepercent", 0)), reverse=True)
-        top5    = data_sorted[:5]
-        bottom5 = data_sorted[-5:][::-1]
+        # 涨幅榜
+        params_top = {
+            "pn": 1, "pz": 5, "po": 1, "np": 1,
+            "fltt": 2, "invt": 2, "fid": "f3",
+            "fs": "m:90+t:2",  # m:90=行业分类, t:2=行业板块
+            "fields": "f12,f14,f3",
+        }
+        res_top = requests.get(url, params=params_top, timeout=10,
+                              headers=HEADERS, verify=False)
+        data_top = res_top.json().get("data", {}).get("diff", []) or []
+
+        # 跌幅榜
+        params_bot = dict(params_top)
+        params_bot["po"] = 0  # 升序排列
+        res_bot = requests.get(url, params=params_bot, timeout=10,
+                              headers=HEADERS, verify=False)
+        data_bot = res_bot.json().get("data", {}).get("diff", []) or []
+
         lines.append("**涨幅 Top5**")
-        for i, s in enumerate(top5):
-            pct = float(s.get("changepercent", 0))
-            lines.append(f"{i+1}. {s.get('name','')}\t+{pct:.2f}%")
+        for i, s in enumerate(data_top):
+            pct = s.get("f3", 0)
+            lines.append(f"{i+1}. {s.get('f14','')}\t+{pct:.2f}%")
+
         lines.append("\n**跌幅 Top5**")
-        for i, s in enumerate(bottom5):
-            pct = float(s.get("changepercent", 0))
-            lines.append(f"{i+1}. {s.get('name','')}\t{pct:.2f}%")
+        for i, s in enumerate(data_bot):
+            pct = s.get("f3", 0)
+            lines.append(f"{i+1}. {s.get('f14','')}\t{pct:.2f}%")
         lines.append("")
     except Exception as e:
         lines.append(f"获取失败：{e}\n")
@@ -463,7 +472,7 @@ def build_report():
 def send_to_serverchan(title, content):
     url = f"https://sctapi.ftqq.com/{SENDKEY}.send"
     try:
-        res = requests.post(url, data={"title": title, "desp": content}, timeout=15)
+        res = requests.post(url, data={"title": title, "desp": content}, timeout=15, verify=False)
         result = res.json()
         if result.get("data", {}).get("errno") == 0 or result.get("code") == 0:
             print("✅ Server酱推送成功")
