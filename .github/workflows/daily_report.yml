@@ -1,14 +1,13 @@
 name: 自选股每日日报
 on:
   schedule:
-    # 北京时间20:30 = UTC12:30，修正cron到整点30分，周一至周五
+    # 北京时间20:30 = UTC12:30
     - cron: '30 12 * * 1-5'
-  workflow_dispatch: # 手动触发测试，修复定时不执行调试
+  workflow_dispatch: # 手动触发测试
 jobs:
   run-report:
     runs-on: ubuntu-latest
     env:
-      # 强制Ubuntu容器时区为上海，解决脚本日期判断错误
       TZ: Asia/Shanghai
       SENDKEY: ${{ secrets.SENDKEY }}
       DEEPSEEK_KEY: ${{ secrets.DEEPSEEK_KEY }}
@@ -20,11 +19,10 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           pip install -r requirements.txt
-          # 打印依赖版本，方便排错
           pip list
 
-      - name: 打印环境时区、时间校验
-        run: date && echo "Python时区校验:" && python3 -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('Asia/Shanghai')))"
+      - name: 打印时区校验
+        run: date && python3 -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('Asia/Shanghai')))"
 
-      - name: 运行日报脚本（立即执行模式）
+      - name: 运行日报脚本
         run: python3 stock_daily_report.py --now
