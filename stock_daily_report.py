@@ -18,9 +18,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 os.environ['NO_PROXY'] = '*'
 os.environ['no_proxy'] = '*'
-
-# AKShare全局网络优化
-ak.set_timeout((10, 18))
 session = requests.Session()
 adapter = HTTPAdapter(max_retries=3)
 session.mount("https://", adapter)
