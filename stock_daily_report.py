@@ -186,9 +186,10 @@ def get_market_overview():
                     prev_close = float(parts[2]) if parts[2] else close
                     change = close - prev_close
                     pct = (change / prev_close * 100) if prev_close else 0
-                    amount = float(parts[8]) if parts[8] else 0
+                    # parts[8]=成交量(股), parts[9]=成交额(元)
+                    amount = float(parts[9]) if len(parts) > 9 and parts[9] else 0
                     sign_str = "+" if change >= 0 else ""
-                    amt_str = f"{amount/10000:.2f}亿" if amount else "N/A"
+                    amt_str = f"{amount/1e8:.2f}亿" if amount else "N/A"
                     lines.append(f"**{name}**")
                     lines.append(f"- 当前：{close:.2f}　涨跌：{sign_str}{pct:.2f}%")
                     lines.append(f"- 成交额：{amt_str}")
@@ -253,13 +254,30 @@ def get_sector_flow():
     return "\n".join(lines)
 
 # ============================================================
-# 3. 个股/ETF资金流向 东方财富（禁用SSL验证）
+# 3. 通用请求头定义
 # ============================================================
+SINA_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Referer": "https://finance.sina.com.cn/",
+}
+
 EM_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://data.eastmoney.com/",
 }
 
+ANNOUNCEMENT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Referer": "https://finance.sina.com.cn/",
+}
+
+# ============================================================
+# 4. 个股/ETF资金流向 东方财富（禁用SSL验证）
+# ============================================================
 def get_stock_flow(stock_code, market, retries=3):
     """通过东方财富获取个股资金流向（禁用SSL验证）"""
     last_err = None
