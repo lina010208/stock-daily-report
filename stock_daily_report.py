@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 自选股每日资金走向 + 公告汇总 + AI点评
-修复版：使用 cninfo（巨潮资讯）公告接口，解决东方财富连接问题
+- 市场行情/板块: 新浪财经
+- 资金流向: 东方财富（禁用SSL验证）
+- 公告: 新浪财经
 每晚 20:30 定时推送至 Server酱
 """
-import requests, sys, os, time, random, argparse, urllib3, traceback, re
+import requests, sys, os, time, random, argparse, urllib3, traceback, re, json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import akshare as ak
 from requests.adapters import HTTPAdapter
 
 # 标准输出utf8兼容
@@ -32,9 +33,9 @@ def _disable_proxy():
 
 _disable_proxy()
 
-# requests全局配置
+# requests全局配置（禁用SSL验证，解决证书问题）
 session = requests.Session()
-session.trust_env = False  # 不使用系统代理
+session.trust_env = False
 adapter = HTTPAdapter(max_retries=3)
 session.mount("https://", adapter)
 session.mount("http://", adapter)
@@ -147,7 +148,7 @@ def get_market_overview():
     for sid, (name, sina_code) in index_map.items():
         try:
             url = f"https://hq.sinajs.cn/list={sina_code}"
-            resp = session.get(url, headers=SINA_HEADERS, timeout=10)
+            resp = session.get(url, headers=SINA_HEADERS, timeout=10, verify=False)
             content = resp.text
             # 解析: var hq_str_sh000001="name,price,change,pct,volume,amount..."
             match = re.search(r'"([^"]+)"', content)
@@ -181,7 +182,7 @@ def get_sector_flow():
         # 新浪财经行业板块排行
         url = "https://vip.stock.finance.sina.com.cn/q/view/newFLJK.php"
         params = {"param": "hy", "type": "2"}
-        resp = session.get(url, params=params, headers=SINA_HEADERS, timeout=15)
+        resp = session.get(url, params=params, headers=SINA_HEADERS, timeout=15, verify=False)
         content = resp.text
 
         # 解析JSON数据: [["板块名","涨幅","涨跌额","成交量","成交额",...],...]
@@ -214,58 +215,49 @@ def get_sector_flow():
     return "\n".join(lines)
 
 # ============================================================
-# 3. 个股/ETF资金流向 新浪财经API（替代东方财富，更稳定）
+# 3. 个股/ETF资金流向 东方财富（禁用SSL验证）
 # ============================================================
-SINA_HEADERS = {
+EM_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    "Referer": "https://finance.sina.com.cn/",
+    "Referer": "https://data.eastmoney.com/",
 }
 
 def get_stock_flow(stock_code, market, retries=3):
-    """通过新浪财经获取个股资金流向"""
+    """通过东方财富获取个股资金流向（禁用SSL验证）"""
     last_err = None
+    # 市场标识转换: sh=1, sz=0
+    market_code = 1 if market == "sh" else 0
     for attempt in range(1, retries + 1):
         try:
             pure_code = re.sub(r"\D", "", stock_code)
-            # 新浪财经资金流向API
-            url = f"https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssi_ssfund_detail"
+            url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
             params = {
-                "daima": pure_code,
-                "page": 1,
-                "num": 1,
+                "lmt": 0,
+                "klt": 101,  # 日K线
+                "secid": f"{market_code}.{pure_code}",
+                "fields1": "f1,f2,f3,f7",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+                "ut": "b2884a393a59ad64002292a3e90d46a5"
             }
-            resp = session.get(url, params=params, headers=SINA_HEADERS, timeout=10)
-            content = resp.text
+            resp = session.get(url, params=params, headers=EM_HEADERS, timeout=15, verify=False)
+            data = resp.json()
 
-            # 解析JSONP返回
-            import json
-            match = re.search(r'\((.+)\)', content)
-            if match:
-                data = json.loads(match.group(1))
-                if data and len(data) > 0:
-                    row = data[0]
-                    return {
-                        "date": row.get("datetime", datetime.now(BEIJING_TZ).strftime("%Y-%m-%d"))[:10],
-                        "main_net": float(row.get("main_net", 0)),
-                        "small_net": float(row.get("small_net", 0)),
-                        "mid_net": float(row.get("mid_net", 0)),
-                        "large_net": float(row.get("large_net", 0)),
-                        "super_net": float(row.get("super_net", 0)),
-                    }, None
-
-            # 备用：直接返回0，避免完全失败
-            return {
-                "date": datetime.now(BEIJING_TZ).strftime("%Y-%m-%d"),
-                "main_net": 0, "small_net": 0, "mid_net": 0,
-                "large_net": 0, "super_net": 0,
-            }, None
+            if data.get("data") and data["data"].get("klines"):
+                klines = data["data"]["klines"]
+                latest = klines[-1].split(",")  # "2026-07-07,成交量,主力净流入,中单净流入,超大单净流入,大单净流入,..."
+                return {
+                    "date": latest[0],
+                    "super_net": float(latest[3]) if latest[3] else 0,  # 超大单
+                    "large_net": float(latest[4]) if latest[4] else 0,  # 大单
+                    "mid_net": float(latest[2]) if latest[2] else 0,    # 中单
+                    "main_net": float(latest[1]) if latest[1] else 0,  # 主力净流入(简化计算)
+                    "small_net": 0,  # 小单从API无法直接获取
+                }, None
+            return None, "无数据"
         except Exception as e:
             last_err = str(e)
             print(f"[资金流向重试 {attempt}] {stock_code}: {e}")
             time.sleep(0.8 * attempt)
-
     print(f"[资金流向失败] {stock_code}: {last_err}")
     return None, last_err
 
@@ -298,7 +290,7 @@ def get_announcements(stock_code):
         pure_code = re.sub(r"\D", "", stock_code)
         # 新浪财经公告接口
         url = f"https://vip.stock.finance.sina.com.cn/corp/go.php/vCB_AllBulletin/totalDays/50/type/1/stockid/{pure_code}.phtml"
-        resp = session.get(url, headers=ANNOUNCEMENT_HEADERS, timeout=10)
+        resp = session.get(url, headers=ANNOUNCEMENT_HEADERS, timeout=10, verify=False)
         # 解析公告列表页
         import re
         content = resp.text
