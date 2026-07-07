@@ -146,10 +146,11 @@ def get_market_overview():
         "sz399006": ("创业板指", "sz399006", "0.399006"),
     }
 
-    # 大盘资金流向
+    # 先获取大盘资金流向（东方财富）
     market_flow = {}
     for sid, (name, sina_code, em_code) in index_map.items():
         try:
+            time.sleep(0.3)  # 请求间隔防限流
             url = "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get"
             params = {
                 'lmt': 0, 'klt': 101, 'secid': em_code,
@@ -170,7 +171,9 @@ def get_market_overview():
         except Exception as e:
             print(f"[大盘资金流向失败] {sid}: {e}")
 
+    # 获取行情数据（新浪财经）
     for sid, (name, sina_code, em_code) in index_map.items():
+        time.sleep(0.3)  # 请求间隔防限流
         try:
             url = f"https://hq.sinajs.cn/list={sina_code}"
             resp = session.get(url, headers=SINA_HEADERS, timeout=10, verify=False)
@@ -430,7 +433,7 @@ def build_report():
         else:
             block.append("暂无新公告\n")
         block.append(format_stock_flow(name, code, flow, err))
-        block.append(f"> 💡 {cmt}\n---")
+        block.append(f"💡 {cmt}\n---")
         sections.append("\n".join(block))
 
     if fail_cnt:
