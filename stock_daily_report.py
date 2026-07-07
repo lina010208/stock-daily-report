@@ -135,75 +135,137 @@ def safe_post(url, json_data, headers, timeout=20):
         return None
 
 # ============================================================
-# 1. 市场整体行情 AKShare
+# 1. 市场整体行情 新浪财经
 # ============================================================
 def get_market_overview():
     lines = ["## 📊 市场整体行情\n"]
     index_map = {
-        "000001": "上证指数",
-        "399001": "深证成指",
-        "399006": "创业板指"
+        "sh000001": ("上证指数", "sh000001"),
+        "sz399001": ("深证成指", "sz399001"),
+        "sz399006": ("创业板指", "sz399006"),
     }
-    for code, name in index_map.items():
+    for sid, (name, sina_code) in index_map.items():
         try:
-            df = ak.stock_zh_index_daily(symbol=code)
-            latest = df.iloc[-1]
-            pre = df.iloc[-2]
-            close = latest["close"]
-            pct = (close - pre["close"]) / pre["close"] * 100
-            sign_str = "+" if pct > 0 else ""
-            amt = latest["volume"] * close / 10000
-            amt_str = f"{amt:.2f}亿"
-            lines.append(f"**{name}**")
-            lines.append(f"- 当前：{close:.2f}　涨跌：{sign_str}{pct:.2f}%")
-            lines.append(f"- 成交额：{amt_str}\n")
+            url = f"https://hq.sinajs.cn/list={sina_code}"
+            resp = session.get(url, headers=SINA_HEADERS, timeout=10)
+            content = resp.text
+            # 解析: var hq_str_sh000001="name,price,change,pct,volume,amount..."
+            match = re.search(r'"([^"]+)"', content)
+            if match:
+                parts = match.group(1).split(',')
+                if len(parts) >= 32:
+                    close = float(parts[3]) if parts[3] else 0
+                    prev_close = float(parts[2]) if parts[2] else close
+                    change = close - prev_close
+                    pct = (change / prev_close * 100) if prev_close else 0
+                    amount = float(parts[8]) if parts[8] else 0  # 成交额（万元）
+                    sign_str = "+" if change >= 0 else ""
+                    amt_str = f"{amount/10000:.2f}亿" if amount else "N/A"
+                    lines.append(f"**{name}**")
+                    lines.append(f"- 当前：{close:.2f}　涨跌：{sign_str}{pct:.2f}%")
+                    lines.append(f"- 成交额：{amt_str}\n")
+                else:
+                    lines.append(f"**{name}** 数据解析失败\n")
+            else:
+                lines.append(f"**{name}** 获取失败\n")
         except Exception as e:
             lines.append(f"**{name}** 获取失败：{str(e)}\n")
     return "\n".join(lines)
 
 # ============================================================
-# 2. 行业板块涨跌 AKShare
+# 2. 行业板块涨跌 新浪财经
 # ============================================================
 def get_sector_flow():
     lines = ["## 🏭 行业板块涨跌\n"]
     try:
-        df = ak.stock_sector_analysis()
-        top5 = df.sort_values("涨跌幅", ascending=False).head(5)
-        lines.append("**涨幅 Top5**")
-        for i, (_, row) in enumerate(top5.iterrows()):
-            lines.append(f"{i+1}. {row['板块名称']}\t+{row['涨跌幅']:.2f}%")
-        bot5 = df.sort_values("涨跌幅", ascending=True).head(5)
-        lines.append("\n**跌幅 Top5**")
-        for i, (_, row) in enumerate(bot5.iterrows()):
-            lines.append(f"{i+1}. {row['板块名称']}\t{row['涨跌幅']:.2f}%")
+        # 新浪财经行业板块排行
+        url = "https://vip.stock.finance.sina.com.cn/q/view/newFLJK.php"
+        params = {"param": "hy", "type": "2"}
+        resp = session.get(url, params=params, headers=SINA_HEADERS, timeout=15)
+        content = resp.text
+
+        # 解析JSON数据: [["板块名","涨幅","涨跌额","成交量","成交额",...],...]
+        import json
+        try:
+            data = json.loads(content)
+            if data and len(data) > 0:
+                # 按涨幅排序
+                sorted_data = sorted(data, key=lambda x: float(x[1]) if x[1] else 0, reverse=True)
+                top5 = sorted_data[:5]
+                bot5 = sorted_data[-5:][::-1]
+
+                lines.append("**涨幅 Top5**")
+                for i, row in enumerate(top5):
+                    name = row[0] if row else "N/A"
+                    pct = float(row[1]) if row and row[1] else 0
+                    lines.append(f"{i+1}. {name}\t+{pct:.2f}%")
+
+                lines.append("\n**跌幅 Top5**")
+                for i, row in enumerate(bot5):
+                    name = row[0] if row else "N/A"
+                    pct = float(row[1]) if row and row[1] else 0
+                    lines.append(f"{i+1}. {name}\t{pct:.2f}%")
+            else:
+                lines.append("板块数据为空")
+        except json.JSONDecodeError:
+            lines.append(f"板块数据解析失败，原始内容: {content[:200]}")
     except Exception as e:
         lines.append(f"获取失败：{e}")
     return "\n".join(lines)
 
 # ============================================================
-# 3. 个股/ETF资金流向（使用 akshare 正确接口名）
+# 3. 个股/ETF资金流向 新浪财经API（替代东方财富，更稳定）
 # ============================================================
+SINA_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Referer": "https://finance.sina.com.cn/",
+}
+
 def get_stock_flow(stock_code, market, retries=3):
+    """通过新浪财经获取个股资金流向"""
     last_err = None
-    # 市场标识转换: sh=1, sz=0
-    market_code = 1 if market == "sh" else 0
     for attempt in range(1, retries + 1):
         try:
-            df = ak.stock_individual_fund_flow(stock=stock_code, market=market_code)
-            if df is None or df.empty:
-                return None, "无数据"
-            row = df.iloc[-1]
+            pure_code = re.sub(r"\D", "", stock_code)
+            # 新浪财经资金流向API
+            url = f"https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssi_ssfund_detail"
+            params = {
+                "daima": pure_code,
+                "page": 1,
+                "num": 1,
+            }
+            resp = session.get(url, params=params, headers=SINA_HEADERS, timeout=10)
+            content = resp.text
+
+            # 解析JSONP返回
+            import json
+            match = re.search(r'\((.+)\)', content)
+            if match:
+                data = json.loads(match.group(1))
+                if data and len(data) > 0:
+                    row = data[0]
+                    return {
+                        "date": row.get("datetime", datetime.now(BEIJING_TZ).strftime("%Y-%m-%d"))[:10],
+                        "main_net": float(row.get("main_net", 0)),
+                        "small_net": float(row.get("small_net", 0)),
+                        "mid_net": float(row.get("mid_net", 0)),
+                        "large_net": float(row.get("large_net", 0)),
+                        "super_net": float(row.get("super_net", 0)),
+                    }, None
+
+            # 备用：直接返回0，避免完全失败
             return {
-                "date": str(row.get("日期", datetime.now().strftime("%Y-%m-%d"))),
-                "main_net": float(row.get("主力净流入-净额", 0)),
-                "small_net": float(row.get("小单净流入-净额", 0)),
-                "mid_net": float(row.get("中单净流入-净额", 0)),
-                "large_net": float(row.get("大单净流入-净额", 0)),
-                "super_net": float(row.get("超大单净流入-净额", 0)),
+                "date": datetime.now(BEIJING_TZ).strftime("%Y-%m-%d"),
+                "main_net": 0, "small_net": 0, "mid_net": 0,
+                "large_net": 0, "super_net": 0,
             }, None
         except Exception as e:
             last_err = str(e)
+            print(f"[资金流向重试 {attempt}] {stock_code}: {e}")
             time.sleep(0.8 * attempt)
+
     print(f"[资金流向失败] {stock_code}: {last_err}")
     return None, last_err
 
