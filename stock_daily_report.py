@@ -136,21 +136,45 @@ def safe_post(url, json_data, headers, timeout=20):
         return None
 
 # ============================================================
-# 1. 市场整体行情 新浪财经
+# 1. 市场整体行情 + 大盘资金流向 新浪财经 + 东方财富
 # ============================================================
 def get_market_overview():
     lines = ["## 📊 市场整体行情\n"]
     index_map = {
-        "sh000001": ("上证指数", "sh000001"),
-        "sz399001": ("深证成指", "sz399001"),
-        "sz399006": ("创业板指", "sz399006"),
+        "sh000001": ("上证指数", "sh000001", "1.000001"),
+        "sz399001": ("深证成指", "sz399001", "0.399001"),
+        "sz399006": ("创业板指", "sz399006", "0.399006"),
     }
-    for sid, (name, sina_code) in index_map.items():
+
+    # 大盘资金流向
+    market_flow = {}
+    for sid, (name, sina_code, em_code) in index_map.items():
+        try:
+            url = "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get"
+            params = {
+                'lmt': 0, 'klt': 101, 'secid': em_code,
+                'fields1': 'f1,f2,f3,f7',
+                'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65',
+                'ut': 'b2884a393a59ad64002292a3e90d46a5'
+            }
+            resp = session.get(url, params=params, headers=EM_HEADERS, timeout=15, verify=False)
+            data = resp.json()
+            if data.get('data') and data['data'].get('klines'):
+                kline = data['data']['klines'][-1].split(',')
+                market_flow[sid] = {
+                    'date': kline[0],
+                    'main_net': float(kline[1]) if kline[1] else 0,
+                    'super_net': float(kline[3]) if kline[3] else 0,
+                    'large_net': float(kline[4]) if kline[4] else 0,
+                }
+        except Exception as e:
+            print(f"[大盘资金流向失败] {sid}: {e}")
+
+    for sid, (name, sina_code, em_code) in index_map.items():
         try:
             url = f"https://hq.sinajs.cn/list={sina_code}"
             resp = session.get(url, headers=SINA_HEADERS, timeout=10, verify=False)
             content = resp.text
-            # 解析: var hq_str_sh000001="name,price,change,pct,volume,amount..."
             match = re.search(r'"([^"]+)"', content)
             if match:
                 parts = match.group(1).split(',')
@@ -159,12 +183,19 @@ def get_market_overview():
                     prev_close = float(parts[2]) if parts[2] else close
                     change = close - prev_close
                     pct = (change / prev_close * 100) if prev_close else 0
-                    amount = float(parts[8]) if parts[8] else 0  # 成交额（万元）
+                    amount = float(parts[8]) if parts[8] else 0
                     sign_str = "+" if change >= 0 else ""
                     amt_str = f"{amount/10000:.2f}亿" if amount else "N/A"
                     lines.append(f"**{name}**")
                     lines.append(f"- 当前：{close:.2f}　涨跌：{sign_str}{pct:.2f}%")
-                    lines.append(f"- 成交额：{amt_str}\n")
+                    lines.append(f"- 成交额：{amt_str}")
+                    # 添加资金流向
+                    flow = market_flow.get(sid)
+                    if flow:
+                        main = flow['main_net']
+                        main_str = f"+{main/1e8:.2f}亿" if main >= 0 else f"{main/1e8:.2f}亿"
+                        lines.append(f"- 主力净流入：{main_str}")
+                    lines.append("")
                 else:
                     lines.append(f"**{name}** 数据解析失败\n")
             else:
@@ -425,8 +456,8 @@ def send_to_serverchan(title, content, retry=2):
     if not SENDKEY:
         print("⚠️ 未配置SENDKEY，跳过推送")
         return
-    # 使用官方备用国内域名
-    url = f"https://sct-beta.ftqq.com/{SENDKEY}.send"
+    # 使用官方推送地址 sctapi.ftqq.com
+    url = f"https://sctapi.ftqq.com/{SENDKEY}.send"
     for i in range(retry + 1):
         try:
             resp = requests.post(url, data={"title": title, "desp": content}, timeout=15, verify=False)
