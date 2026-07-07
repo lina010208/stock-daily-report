@@ -213,37 +213,41 @@ def get_market_overview():
 def get_sector_flow():
     lines = ["## 🏭 行业板块涨跌\n"]
     try:
-        # 新浪财经行业板块排行
+        time.sleep(0.3)
         url = "https://vip.stock.finance.sina.com.cn/q/view/newFLJK.php"
         params = {"param": "hy", "type": "2"}
         resp = session.get(url, params=params, headers=SINA_HEADERS, timeout=15, verify=False)
         content = resp.text
 
-        # 解析JSON数据: [["板块名","涨幅","涨跌额","成交量","成交额",...],...]
-        import json
-        try:
-            data = json.loads(content)
-            if data and len(data) > 0:
-                # 按涨幅排序
-                sorted_data = sorted(data, key=lambda x: float(x[1]) if x[1] else 0, reverse=True)
-                top5 = sorted_data[:5]
-                bot5 = sorted_data[-5:][::-1]
+        # 解析JSONP格式: var S_Finance_bankuai_hy = {"hangye_XX":"id,name,count,avg,change,pct,...",...}
+        match = re.search(r'= (\{.*\});?$', content, re.DOTALL)
+        if match:
+            import json
+            data = json.loads(match.group(1))
+            sectors = []
+            for key, val in data.items():
+                parts = val.split(",")
+                if len(parts) >= 6:
+                    try:
+                        name = parts[1]
+                        pct = float(parts[5]) if parts[5] else 0
+                        sectors.append((name, pct))
+                    except:
+                        pass
+            # 按涨幅排序
+            sectors.sort(key=lambda x: x[1], reverse=True)
+            top5 = sectors[:5]
+            bot5 = sectors[-5:][::-1]
 
-                lines.append("**涨幅 Top5**")
-                for i, row in enumerate(top5):
-                    name = row[0] if row else "N/A"
-                    pct = float(row[1]) if row and row[1] else 0
-                    lines.append(f"{i+1}. {name}\t+{pct:.2f}%")
+            lines.append("**涨幅 Top5**")
+            for i, (name, pct) in enumerate(top5):
+                lines.append(f"{i+1}. {name}\t+{pct:.2f}%")
 
-                lines.append("\n**跌幅 Top5**")
-                for i, row in enumerate(bot5):
-                    name = row[0] if row else "N/A"
-                    pct = float(row[1]) if row and row[1] else 0
-                    lines.append(f"{i+1}. {name}\t{pct:.2f}%")
-            else:
-                lines.append("板块数据为空")
-        except json.JSONDecodeError:
-            lines.append(f"板块数据解析失败，原始内容: {content[:200]}")
+            lines.append("\n**跌幅 Top5**")
+            for i, (name, pct) in enumerate(bot5):
+                lines.append(f"{i+1}. {name}\t{pct:.2f}%")
+        else:
+            lines.append(f"板块数据解析失败")
     except Exception as e:
         lines.append(f"获取失败：{e}")
     return "\n".join(lines)
@@ -307,40 +311,39 @@ def format_stock_flow(stock_name, stock_code, data, error=None):
     )
 
 # ============================================================
-# 4. 个股公告 新浪财经（更稳定）
+# 4. 个股公告 新浪财经（返回状态信息）
 # ============================================================
 ANNOUNCEMENT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9",
     "Referer": "https://finance.sina.com.cn/",
 }
 
 def get_announcements(stock_code):
-    """通过新浪财经API获取个股公告"""
+    """通过新浪财经获取个股公告，返回(公告列表, 是否抓取失败)"""
     today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
     res = []
+    fetch_failed = False
     try:
+        time.sleep(0.3)  # 防限流
         pure_code = re.sub(r"\D", "", stock_code)
-        # 新浪财经公告接口
         url = f"https://vip.stock.finance.sina.com.cn/corp/go.php/vCB_AllBulletin/totalDays/50/type/1/stockid/{pure_code}.phtml"
-        resp = session.get(url, headers=ANNOUNCEMENT_HEADERS, timeout=10, verify=False)
-        # 解析公告列表页
-        import re
+        resp = session.get(url, headers=ANNOUNCEMENT_HEADERS, timeout=15, verify=False)
         content = resp.text
-        # 简单匹配最新几条公告
-        pattern = r'<td class="cgbb">(\d{4}-\d{2}-\d{2})</td>\s*<td><a href="([^"]+)"[^>]*>([^<]+)</a></td>'
+        # 匹配公告: <td class="cgbb">日期</td><td><a href="链接">标题</a></td>
+        pattern = r'<td[^>]*class="cgbb"[^>]*>(\d{4}-\d{2}-\d{2})</td>\s*<td[^>]*><a[^>]+>([^<]+)</a></td>'
         matches = re.findall(pattern, content)
-        for ann_date, ann_link, ann_title in matches[:10]:
+        for ann_date, ann_title in matches[:20]:
             if ann_date == today:
-                full_link = "https://vip.stock.finance.sina.com.cn" + ann_link if ann_link.startswith('/') else ann_link
-                res.append({"title": ann_title.strip(), "link": full_link})
+                res.append({"title": ann_title.strip(), "link": ""})
     except Exception as e:
         print(f"公告抓取失败 {stock_code}: {e}")
-    return res
+        fetch_failed = True
+    return res, fetch_failed
 
 # ============================================================
-# 5. AI 点评 DeepSeek
+# 5. AI 点评 DeepSeek（纯文本，避免Markdown渲染）
 # ============================================================
 def get_ai_comment(stock_name, stock_code, announcements, flow_data):
     if not DEEPSEEK_KEY:
@@ -359,7 +362,10 @@ def get_ai_comment(stock_name, stock_code, announcements, flow_data):
     if not resp:
         return "AI接口请求失败"
     try:
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+        # 清理Markdown语法，避免Server酱渲染时字体变大
+        content = content.replace("**", "").replace("*", "").replace("__", "")
+        return content
     except Exception as e:
         return f"AI解析失败：{str(e)}"
 
@@ -395,21 +401,21 @@ def build_report():
     with ThreadPoolExecutor(max_workers=2) as ex:
         futures = {ex.submit(fetch_ann, s): s for s in STOCKS}
         for fut in as_completed(futures):
-            code, anns = fut.result()
-            ann_results[code] = anns
+            code, (anns, ann_failed) = fut.result()
+            ann_results[code] = (anns, ann_failed)
 
     stock_dict = {}
     for code, name, mkt in STOCKS:
         flow, err = flow_results[code]
-        anns = ann_results[code]
-        stock_dict[code] = (name, mkt, flow, anns, err)
+        anns, ann_failed = ann_results[code]
+        stock_dict[code] = (name, mkt, flow, anns, ann_failed, err)
 
     # AI点评并发
     comments = {}
     if USE_AI_COMMENT and DEEPSEEK_KEY:
         def fetch_cmt(item):
             code, name, mkt = item
-            name, mkt, flow, anns, err = stock_dict[code]
+            name, mkt, flow, anns, ann_failed, err = stock_dict[code]
             return code, get_ai_comment(name, code, anns, flow)
         with ThreadPoolExecutor(max_workers=2) as ex:
             futures = {ex.submit(fetch_cmt, s): s for s in STOCKS}
@@ -418,18 +424,22 @@ def build_report():
                 comments[code] = cmt
 
     fail_cnt = 0
+    ann_fail_cnt = 0
     for code, name, mkt in STOCKS:
-        name, mkt, flow, anns, err = stock_dict[code]
+        name, mkt, flow, anns, ann_failed, err = stock_dict[code]
         cmt = comments.get(code, "（AI点评未开启/密钥缺失）")
         if not flow:
             fail_cnt += 1
+        if ann_failed:
+            ann_fail_cnt += 1
         block = [f"### {name}（{code}）\n"]
         if anns:
             block.append("**今日公告：**")
             for a in anns:
-                link = f"[查看原文]({a['link']})" if a["link"] else ""
-                block.append(f"- {a['title']} {link}")
+                block.append(f"- {a['title']}")
             block.append("")
+        elif ann_failed:
+            block.append("（公告抓取失败）\n")
         else:
             block.append("暂无新公告\n")
         block.append(format_stock_flow(name, code, flow, err))
@@ -438,6 +448,8 @@ def build_report():
 
     if fail_cnt:
         sections.insert(1, f"⚠️ 资金流向获取失败 {fail_cnt}/{len(STOCKS)} 只\n")
+    if ann_fail_cnt:
+        sections.insert(1, f"⚠️ 公告获取失败 {ann_fail_cnt}/{len(STOCKS)} 只\n")
 
     # ETF
     sections.append("## 📦 ETF 资金流向\n")
