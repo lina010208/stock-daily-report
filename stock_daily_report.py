@@ -461,7 +461,8 @@ def build_report():
         else:
             block.append("暂无新公告\n")
         block.append(format_stock_flow(name, code, flow, err))
-        block.append(f"💡 {cmt}\n---")
+        # 用HTML控制AI点评字体大小，避免Server酱渲染时变大
+        block.append(f'<span style="font-size:14px">💡 {cmt}</span>\n---')
         sections.append("\n".join(block))
 
     if fail_cnt:
