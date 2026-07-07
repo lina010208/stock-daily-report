@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 自选股每日资金走向 + 公告汇总 + AI点评
-适配GitHub Actions AKShare数据源修复版，解决东方财富接口连接中断
-每晚 20:30 定时推送至 Server酱（备用beta域名）
+修复版：使用 cninfo（巨潮资讯）公告接口，解决东方财富连接问题
+每晚 20:30 定时推送至 Server酱
 """
-import requests, sys, os, time, random, argparse, urllib3, traceback
+import requests, sys, os, time, random, argparse, urllib3, traceback, re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,11 +16,25 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding='utf-8')
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
-os.environ['NO_PROXY'] = '*'
-os.environ['no_proxy'] = '*'
 
-# requests全局重试适配器，网络异常自动重试3次
+# 自动检测并禁用代理（国内数据源不需要代理，代理反而导致连接问题）
+def _disable_proxy():
+    proxies = os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY") or \
+              os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
+    if proxies:
+        print(f"[INFO] 检测到代理 {proxies}，已禁用以访问国内数据源")
+    os.environ['NO_PROXY'] = '*'
+    os.environ['no_proxy'] = '*'
+    os.environ['http_proxy'] = ''
+    os.environ['HTTP_PROXY'] = ''
+    os.environ['https_proxy'] = ''
+    os.environ['HTTPS_PROXY'] = ''
+
+_disable_proxy()
+
+# requests全局配置
 session = requests.Session()
+session.trust_env = False  # 不使用系统代理
 adapter = HTTPAdapter(max_retries=3)
 session.mount("https://", adapter)
 session.mount("http://", adapter)
@@ -167,21 +181,25 @@ def get_sector_flow():
     return "\n".join(lines)
 
 # ============================================================
-# 3. 个股/ETF资金流向 AKShare
+# 3. 个股/ETF资金流向（使用 akshare 正确接口名）
 # ============================================================
 def get_stock_flow(stock_code, market, retries=3):
     last_err = None
+    # 市场标识转换: sh=1, sz=0
+    market_code = 1 if market == "sh" else 0
     for attempt in range(1, retries + 1):
         try:
-            df = ak.stock_individual_fund_flow(stock=stock_code, market=market)
+            df = ak.stock_individual_fund_flow(stock=stock_code, market=market_code)
+            if df is None or df.empty:
+                return None, "无数据"
             row = df.iloc[-1]
             return {
-                "date": str(row["日期"]),
-                "main_net": float(row["主力净流入-净额"]),
-                "small_net": float(row["小单净流入-净额"]),
-                "mid_net": float(row["中单净流入-净额"]),
-                "large_net": float(row["大单净流入-净额"]),
-                "super_net": float(row["超大单净流入-净额"]),
+                "date": str(row.get("日期", datetime.now().strftime("%Y-%m-%d"))),
+                "main_net": float(row.get("主力净流入-净额", 0)),
+                "small_net": float(row.get("小单净流入-净额", 0)),
+                "mid_net": float(row.get("中单净流入-净额", 0)),
+                "large_net": float(row.get("大单净流入-净额", 0)),
+                "super_net": float(row.get("超大单净流入-净额", 0)),
             }, None
         except Exception as e:
             last_err = str(e)
@@ -201,20 +219,34 @@ def format_stock_flow(stock_name, stock_code, data, error=None):
     )
 
 # ============================================================
-# 4. 个股公告 AKShare
+# 4. 个股公告 新浪财经（更稳定）
 # ============================================================
+ANNOUNCEMENT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Referer": "https://finance.sina.com.cn/",
+}
+
 def get_announcements(stock_code):
+    """通过新浪财经API获取个股公告"""
     today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
     res = []
     try:
-        df = ak.stock_announcement(symbol=stock_code)
-        df["公告日期"] = df["公告日期"].astype(str).str[:10]
-        today_df = df[df["公告日期"] == today]
-        for _, row in today_df.iterrows():
-            res.append({
-                "title": row["公告标题"],
-                "link": row["公告链接"]
-            })
+        pure_code = re.sub(r"\D", "", stock_code)
+        # 新浪财经公告接口
+        url = f"https://vip.stock.finance.sina.com.cn/corp/go.php/vCB_AllBulletin/totalDays/50/type/1/stockid/{pure_code}.phtml"
+        resp = session.get(url, headers=ANNOUNCEMENT_HEADERS, timeout=10)
+        # 解析公告列表页
+        import re
+        content = resp.text
+        # 简单匹配最新几条公告
+        pattern = r'<td class="cgbb">(\d{4}-\d{2}-\d{2})</td>\s*<td><a href="([^"]+)"[^>]*>([^<]+)</a></td>'
+        matches = re.findall(pattern, content)
+        for ann_date, ann_link, ann_title in matches[:10]:
+            if ann_date == today:
+                full_link = "https://vip.stock.finance.sina.com.cn" + ann_link if ann_link.startswith('/') else ann_link
+                res.append({"title": ann_title.strip(), "link": full_link})
     except Exception as e:
         print(f"公告抓取失败 {stock_code}: {e}")
     return res
