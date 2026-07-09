@@ -53,7 +53,6 @@ HEADERS = {
 PROXIES = {"http": None, "https": None}
 # 自选股列表：(代码, 名称, 市场标识sh/sz)
 STOCKS = [
-    ("001248", "C华润",        "sz"),
     ("600176", "中国巨石",      "sh"),
     ("600584", "长电科技",      "sh"),
     ("001309", "德明利",        "sz"),
@@ -82,12 +81,6 @@ STOCKS = [
     ("301630", "同宇新材",      "sz"),
     ("300308", "中际旭创",      "sz"),
     ("300408", "三环集团",      "sz"),
-]
-ETFS = [
-    ("159509", "纳指科技ETF景顺",  "sz"),
-    ("513390", "纳指100ETF博时",   "sh"),
-    ("513310", "中韩半导体ETF",    "sh"),
-    ("159659", "纳斯达克100ETI",   "sz"),
 ]
 # ============================================================
 # 工具函数
@@ -276,7 +269,7 @@ ANNOUNCEMENT_HEADERS = {
 }
 
 # ============================================================
-# 4. 个股/ETF资金流向 东方财富（禁用SSL验证）
+# 4. 个股资金流向 东方财富（禁用SSL验证）
 # ============================================================
 def get_stock_flow(stock_code, market, retries=3):
     """通过东方财富获取个股资金流向（禁用SSL验证）"""
@@ -462,25 +455,13 @@ def build_report():
             block.append("暂无新公告\n")
         block.append(format_stock_flow(name, code, flow, err))
         # 用HTML控制AI点评字体大小，避免Server酱渲染时变大
-        block.append(f'<span style="font-size:14px">💡 {cmt}</span>\n---')
+        block.append(f'<span style="font-size:12px">💡 {cmt}</span>\n---')
         sections.append("\n".join(block))
 
     if fail_cnt:
         sections.insert(1, f"⚠️ 资金流向获取失败 {fail_cnt}/{len(STOCKS)} 只\n")
     if ann_fail_cnt:
         sections.insert(1, f"⚠️ 公告获取失败 {ann_fail_cnt}/{len(STOCKS)} 只\n")
-
-    # ETF
-    sections.append("## 📦 ETF 资金流向\n")
-    def fetch_etf(item):
-        code, name, mkt = item
-        data, err = get_stock_flow(code, mkt)
-        return name, code, data, err
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        futures = {ex.submit(fetch_etf, e): e for e in ETFS}
-        for fut in as_completed(futures):
-            name, code, data, err = fut.result()
-            sections.append(format_stock_flow(name, code, data, err))
     return "\n".join(sections)
 
 # ============================================================
