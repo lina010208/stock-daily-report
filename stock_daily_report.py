@@ -46,7 +46,7 @@ session.mount("http://", adapter)
 SENDKEY         = os.environ.get("SENDKEY", "")
 DEEPSEEK_KEY    = os.environ.get("DEEPSEEK_KEY", "")
 # [临时关闭AI点评] 测试完格式后可改回 "true"，并可切换 AI_METHOD 策略
-USE_AI_COMMENT  = os.environ.get("USE_AI_COMMENT", "false").lower() == "true"
+USE_AI_COMMENT  = os.environ.get("USE_AI_COMMENT", "true").lower() == "true"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Referer": "https://data.eastmoney.com/",
