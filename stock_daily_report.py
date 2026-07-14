@@ -375,7 +375,14 @@ def get_ai_comment(stock_name, stock_code, announcements, flow_data):
     try:
         content = resp.json()["choices"][0]["message"]["content"].strip()
         # 清理Markdown语法，避免Server酱渲染时字体变大
+        # 1. 移除 # 号（防止被渲染成大标题）
+        content = content.replace("#", "")
+        # 2. 移除 ** 加粗、* 斜体、__ 下划线
         content = content.replace("**", "").replace("*", "").replace("__", "")
+        # 3. 合并换行为空格，避免多段落断裂
+        content = content.replace("\n", " ").replace("\r", " ")
+        # 4. 压缩多余空格
+        content = re.sub(r"\s+", " ", content).strip()
         return content
     except Exception as e:
         return f"AI解析失败：{str(e)}"
@@ -454,8 +461,8 @@ def build_report():
         else:
             block.append("暂无新公告\n")
         block.append(format_stock_flow(name, code, flow, err))
-        # 用HTML控制AI点评字体大小，避免Server酱渲染时变大
-        block.append(f'<span style="font-size:12px">💡 {cmt}</span>\n---')
+        # AI点评使用纯文本模式，避免Server酱Markdown渲染时字体异常变大
+        block.append(f'\n💡 AI快评：{cmt}\n---')
         sections.append("\n".join(block))
 
     if fail_cnt:

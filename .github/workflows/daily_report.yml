@@ -1,8 +1,10 @@
 name: 自选股每日日报
 on:
   schedule:
-    # 北京时间20:30 = UTC12:30
-    - cron: '30 12 * * 1-5'
+    # 北京时间20:30 = UTC12:30，但GitHub Actions免费账户存在5-7h调度延迟
+    # 实测数据：所有定时任务被推迟至UTC18:00左右（北京时间次日凌晨2点）
+    # 解决方案：将cron提前到UTC6:30（=北京时间14:30），6h延迟后约为北京时间20:30
+    - cron: '30 6 * * 1-5'
   workflow_dispatch: # 手动触发测试
 jobs:
   run-report:
