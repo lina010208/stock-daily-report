@@ -45,7 +45,8 @@ session.mount("http://", adapter)
 # ============================================================
 SENDKEY         = os.environ.get("SENDKEY", "")
 DEEPSEEK_KEY    = os.environ.get("DEEPSEEK_KEY", "")
-USE_AI_COMMENT  = os.environ.get("USE_AI_COMMENT", "true").lower() == "true"
+# [临时关闭AI点评] 测试完格式后可改回 "true"，并可切换 AI_METHOD 策略
+USE_AI_COMMENT  = os.environ.get("USE_AI_COMMENT", "false").lower() == "true"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Referer": "https://data.eastmoney.com/",
@@ -354,11 +355,12 @@ def get_announcements(stock_code):
     return res, fetch_failed
 
 # ============================================================
-# 5. AI 点评 DeepSeek（纯文本，避免Markdown渲染）
+# 5. AI 点评 DeepSeek + 多策略清洗（避免Server酱Markdown渲染异常）
 # ============================================================
 def get_ai_comment(stock_name, stock_code, announcements, flow_data):
+    """获取AI原始点评文本（不含清洗）"""
     if not DEEPSEEK_KEY:
-        return "未配置DEEPSEEK_KEY，跳过AI点评"
+        return ""
     ann_text = "今日公告：\n" + "\n".join(f"- {a['title']}" for a in announcements) if announcements else "今日无新公告。"
     if flow_data:
         flow_text = f"资金流向：主力净流入 {sign(flow_data['main_net'])}，超大单 {sign(flow_data['super_net'])}，大单 {sign(flow_data['large_net'])}"
@@ -371,21 +373,85 @@ def get_ai_comment(stock_name, stock_code, announcements, flow_data):
     payload = {"model": "deepseek-chat", "max_tokens": 200, "messages": [{"role": "user", "content": prompt}]}
     resp = safe_post("https://api.deepseek.com/v1/chat/completions", payload, headers, timeout=30)
     if not resp:
-        return "AI接口请求失败"
+        return ""
     try:
-        content = resp.json()["choices"][0]["message"]["content"].strip()
-        # 清理Markdown语法，避免Server酱渲染时字体变大
-        # 1. 移除 # 号（防止被渲染成大标题）
-        content = content.replace("#", "")
-        # 2. 移除 ** 加粗、* 斜体、__ 下划线
-        content = content.replace("**", "").replace("*", "").replace("__", "")
-        # 3. 合并换行为空格，避免多段落断裂
-        content = content.replace("\n", " ").replace("\r", " ")
-        # 4. 压缩多余空格
-        content = re.sub(r"\s+", " ", content).strip()
-        return content
+        return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        return f"AI解析失败：{str(e)}"
+        return ""
+
+def clean_ai_comment(raw_text, method="aggressive_strip"):
+    """
+    对AI原始文本执行多策略清洗，避免Server酱Markdown渲染时字体异常变大。
+    可选策略：
+      - aggressive_strip : 激进剥离所有Markdown/HTML触发字符，用全角标点替换
+      - inline_code     : 用反引号包裹成行内代码（部分平台可能仍渲染但字体不变）
+      - blockquote      : 每行前缀 > 转为引用块（通常不会被放大）
+      - fullwidth       : 将可能导致标题/列表的字符替换为全角版本
+      - prefix_break    : 前置不可见零宽字符打断Markdown解析器
+      - code_block      : 包裹在三个反引号代码块中
+    """
+    if not raw_text:
+        return "(暂无点评)"
+
+    text = raw_text.strip()
+
+    if method == "aggressive_strip":
+        # 策略A：暴力剥离所有可能触发Markdown的字符
+        # 1. 先处理行首数字列表 (如 "1." "1、" "1)" 等)
+        text = re.sub(r'(?:^|\n)\s*(\d+)[\.\、\)）]\s*', r'\1，', text)
+        # 2. 移除所有 Markdown 语法字符
+        for ch in ['#', '*', '_', '`', '~', '>', '|', '[', ']', '!']:
+            text = text.replace(ch, '')
+        # 3. 移除HTML标签
+        text = re.sub(r'<[^>]+>', '', text)
+        # 4. 合并换行为中文顿号分隔
+        text = text.replace('\n', '；').replace('\r', '')
+        # 5. 压缩空白
+        text = re.sub(r'\s{2,}', ' ', text).strip()
+        return text
+
+    elif method == "inline_code":
+        # 策略B：反引号包裹，Markdown渲染为等宽字体小字
+        text = text.replace('\n', ' ').replace('\r', ' ')
+        text = re.sub(r'\s+', ' ', text).strip()
+        return f'`{text}`'
+
+    elif method == "blockquote":
+        # 策略C：转引用块格式
+        lines = text.split('\n')
+        quoted = ['> ' + line for line in lines if line.strip()]
+        return '\n'.join(quoted)
+
+    elif method == "fullwidth":
+        # 策略D：全角字符替换，从源头避免Markdown解析
+        trans = str.maketrans({
+            '#': '＃', '*': '＊', '_': '＿', '`': '｀',
+            '>': '＞', '|': '｜', '[': '［', ']': '］',
+            '!': '！', '~': '～',
+        })
+        text = text.translate(trans)
+        text = re.sub(r'(?:^|\n)\s*(\d+)[\.\、\)）]', r'\1．', text)
+        text = text.replace('\n', ' ').replace('\r', ' ')
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
+    elif method == "prefix_break":
+        # 策略E：前置零宽空格(U+200B)打断Markdown解析器状态机
+        text = text.replace('\n', ' ').replace('\r', ' ')
+        text = re.sub(r'\s+', ' ', text).strip()
+        return f'\u200B{text}'
+
+    elif method == "code_block":
+        # 策略F：代码块包裹
+        text = text.replace('```', "'''")
+        return f'```\n{text}\n```'
+
+    else:
+        # fallback: 简单清洗
+        for ch in ['#', '**', '__', '`']:
+            text = text.replace(ch, '')
+        text = text.replace('\n', ' ').strip()
+        return text
 
 # ============================================================
 # 6. 构建完整日报
@@ -461,8 +527,15 @@ def build_report():
         else:
             block.append("暂无新公告\n")
         block.append(format_stock_flow(name, code, flow, err))
-        # AI点评使用纯文本模式，避免Server酱Markdown渲染时字体异常变大
-        block.append(f'\n💡 AI快评：{cmt}\n---')
+        # [临时去除AI点评] 先验证其他部分格式是否正常
+        # AI_METHOD 选择: aggressive_strip | inline_code | blockquote | fullwidth | prefix_break | code_block
+        # 当前使用 aggressive_strip 策略，若字体仍有问题可切换其他策略测试
+        AI_METHOD = "aggressive_strip"
+        if USE_AI_COMMENT and DEEPSEEK_KEY:
+            cmt = comments.get(code, "AI接口异常")
+            safe_cmt = clean_ai_comment(cmt, method=AI_METHOD)
+            block.append(f'\n💡 AI快评：{safe_cmt}')
+        block.append('\n---')
         sections.append("\n".join(block))
 
     if fail_cnt:
