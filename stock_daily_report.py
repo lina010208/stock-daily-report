@@ -341,13 +341,20 @@ def get_announcements(stock_code):
         pure_code = re.sub(r"\D", "", stock_code)
         url = f"https://vip.stock.finance.sina.com.cn/corp/go.php/vCB_AllBulletin/totalDays/50/type/1/stockid/{pure_code}.phtml"
         resp = session.get(url, headers=ANNOUNCEMENT_HEADERS, timeout=15, verify=False)
+        # 新浪财经页面为GBK编码，需手动指定
+        resp.encoding = "gbk"
         content = resp.text
-        # 匹配公告: <td class="cgbb">日期</td><td><a href="链接">标题</a></td>
-        pattern = r'<td[^>]*class="cgbb"[^>]*>(\d{4}-\d{2}-\d{2})</td>\s*<td[^>]*><a[^>]+>([^<]+)</a></td>'
+        # 新浪财经改版后结构: 2026-07-16&nbsp;<a href="...">标题</a><br>
+        pattern = r'(\d{4}-\d{2}-\d{2})&nbsp;<a[^>]*>([^<]+)</a>'
         matches = re.findall(pattern, content)
         for ann_date, ann_title in matches[:20]:
             if ann_date == today:
                 res.append({"title": ann_title.strip(), "link": ""})
+        # 调试输出：显示抓取到的公告数量和日期范围
+        if matches:
+            print(f"  {stock_code}: 抓取到{len(matches)}条公告，首条日期={matches[0][0]}，今日={today}，匹配={len(res)}条")
+        else:
+            print(f"  {stock_code}: 未匹配到任何公告（页面结构可能再次变更）")
     except Exception as e:
         print(f"公告抓取失败 {stock_code}: {e}")
         fetch_failed = True
