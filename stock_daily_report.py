@@ -139,30 +139,38 @@ def get_market_overview():
         "sz399006": ("创业板指", "sz399006", "0.399006"),
     }
 
-    # 先获取大盘资金流向（东方财富）
+    # 先获取大盘资金流向（东方财富），带重试
     market_flow = {}
     for sid, (name, sina_code, em_code) in index_map.items():
-        try:
-            time.sleep(0.3)  # 请求间隔防限流
-            url = "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get"
-            params = {
-                'lmt': 0, 'klt': 101, 'secid': em_code,
-                'fields1': 'f1,f2,f3,f7',
-                'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65',
-                'ut': 'b2884a393a59ad64002292a3e90d46a5'
-            }
-            resp = session.get(url, params=params, headers=EM_HEADERS, timeout=15, verify=False)
-            data = resp.json()
-            if data.get('data') and data['data'].get('klines'):
-                kline = data['data']['klines'][-1].split(',')
-                market_flow[sid] = {
-                    'date': kline[0],
-                    'main_net': float(kline[1]) if kline[1] else 0,
-                    'super_net': float(kline[3]) if kline[3] else 0,
-                    'large_net': float(kline[4]) if kline[4] else 0,
+        for attempt in range(1, 4):  # 最多3次尝试
+            try:
+                time.sleep(0.3)  # 请求间隔防限流
+                url = "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get"
+                params = {
+                    'lmt': 0, 'klt': 101, 'secid': em_code,
+                    'fields1': 'f1,f2,f3,f7',
+                    'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65',
+                    'ut': 'b2884a393a59ad64002292a3e90d46a5'
                 }
-        except Exception as e:
-            print(f"[大盘资金流向失败] {sid}: {e}")
+                resp = session.get(url, params=params, headers=EM_HEADERS, timeout=15, verify=False)
+                data = resp.json()
+                if data.get('data') and data['data'].get('klines'):
+                    kline = data['data']['klines'][-1].split(',')
+                    market_flow[sid] = {
+                        'date': kline[0],
+                        'main_net': float(kline[1]) if kline[1] else 0,
+                        'super_net': float(kline[3]) if kline[3] else 0,
+                        'large_net': float(kline[4]) if kline[4] else 0,
+                    }
+                    break  # 成功，退出重试循环
+                else:
+                    print(f"[大盘资金流向空数据 尝试{attempt}/3] {sid}")
+                    if attempt < 3:
+                        time.sleep(2 ** attempt)
+            except Exception as e:
+                print(f"[大盘资金流向失败 尝试{attempt}/3] {sid}: {e}")
+                if attempt < 3:
+                    time.sleep(2 ** attempt)
 
     # 获取行情数据（新浪财经）
     for sid, (name, sina_code, em_code) in index_map.items():
@@ -271,43 +279,65 @@ ANNOUNCEMENT_HEADERS = {
 # ============================================================
 # 4. 个股资金流向 东方财富（禁用SSL验证）
 # ============================================================
-def get_stock_flow(stock_code, market, retries=3):
-    """通过东方财富获取个股资金流向（禁用SSL验证）"""
+def get_stock_flow(stock_code, market, retries=4):
+    """通过东方财富获取个股资金流向（禁用SSL验证），失败时自动重试+备用ut token"""
     last_err = None
     # 市场标识转换: sh=1, sz=0
     market_code = 1 if market == "sh" else 0
+    pure_code = re.sub(r"\D", "", stock_code)
+    secid = f"{market_code}.{pure_code}"
+
+    # 备用ut token（东方财富偶尔轮换或限流某token）
+    ut_tokens = [
+        "b2884a393a59ad64002292a3e90d46a5",
+        "bd1d9ddad07788235281f3f4e8ab99a0",
+    ]
+
     for attempt in range(1, retries + 1):
+        ut = ut_tokens[(attempt - 1) % len(ut_tokens)]
         try:
-            pure_code = re.sub(r"\D", "", stock_code)
             url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
             params = {
                 "lmt": 0,
                 "klt": 101,  # 日K线
-                "secid": f"{market_code}.{pure_code}",
+                "secid": secid,
                 "fields1": "f1,f2,f3,f7",
                 "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
-                "ut": "b2884a393a59ad64002292a3e90d46a5"
+                "ut": ut
             }
             resp = session.get(url, params=params, headers=EM_HEADERS, timeout=15, verify=False)
             data = resp.json()
 
             if data.get("data") and data["data"].get("klines"):
                 klines = data["data"]["klines"]
-                latest = klines[-1].split(",")  # "2026-07-07,成交量,主力净流入,中单净流入,超大单净流入,大单净流入,..."
+                # 字段顺序: 日期,主力净流入,小单净流入,中单净流入,大单净流入,超大单净流入,...
+                latest = klines[-1].split(",")
                 return {
                     "date": latest[0],
-                    "super_net": float(latest[3]) if latest[3] else 0,  # 超大单
-                    "large_net": float(latest[4]) if latest[4] else 0,  # 大单
-                    "mid_net": float(latest[2]) if latest[2] else 0,    # 中单
-                    "main_net": float(latest[1]) if latest[1] else 0,  # 主力净流入(简化计算)
-                    "small_net": 0,  # 小单从API无法直接获取
+                    "main_net": float(latest[1]) if latest[1] else 0,   # 主力净流入
+                    "small_net": float(latest[2]) if latest[2] else 0,  # 小单净流入
+                    "mid_net": float(latest[3]) if latest[3] else 0,    # 中单净流入
+                    "large_net": float(latest[4]) if latest[4] else 0,  # 大单净流入
+                    "super_net": float(latest[5]) if latest[5] else 0,  # 超大单净流入
                 }, None
-            return None, "无数据"
+            else:
+                # 东方财富返回200但data为null —— 接口暂时异常，应该重试
+                info = f"空数据(rc={data.get('rc')})" if isinstance(data, dict) else "空数据"
+                last_err = info
+                print(f"[资金流向空数据 尝试{attempt}/{retries}] {stock_code}: {info}")
+                if attempt < retries:
+                    delay = 2 ** attempt  # 指数退避: 2s, 4s, 8s, 16s
+                    print(f"  等待{delay}s后重试...")
+                    time.sleep(delay)
+                continue
         except Exception as e:
             last_err = str(e)
-            print(f"[资金流向重试 {attempt}] {stock_code}: {e}")
-            time.sleep(0.8 * attempt)
-    print(f"[资金流向失败] {stock_code}: {last_err}")
+            print(f"[资金流向异常 尝试{attempt}/{retries}] {stock_code}: {e}")
+            if attempt < retries:
+                delay = 2 ** attempt
+                print(f"  等待{delay}s后重试...")
+                time.sleep(delay)
+    print(f"[资金流向最终失败] {stock_code}: {last_err}")
     return None, last_err
 
 def format_stock_flow(stock_name, stock_code, data, error=None):
